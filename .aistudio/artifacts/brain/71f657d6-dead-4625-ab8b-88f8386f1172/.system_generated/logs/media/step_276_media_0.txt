@@ -1,0 +1,7 @@
+---
+type: "feature"
+title: "Add a Gemini chatbot"
+icon: "voice_chat"
+---
+
+You MUST add a multi-turn chat interface to the app using Gemini. The chat must maintain conversation history, display messages in a scrollable thread, and include a system instruction to give the chatbots specific roles. Use gemini-4-argon for particularly complex tasks, gemini-3.8-flash for general tasks, and gemini-3.1-flash-lite for tasks that should happen fast.

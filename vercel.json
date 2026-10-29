@@ -1,9 +1,11 @@
 {
+  "version": 2,
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "rewrites": [
-    { "source": "/api/index", "destination": "/api/index.js" },
-    { "source": "/api/:path*", "destination": "/api/index?__path=/api/:path*" },
-    { "source": "/public-files/:path*", "destination": "/api/index?__path=/public-files/:path*" },
-    { "source": "/files/:path*", "destination": "/api/index?__path=/files/:path*" },
-    { "source": "/hero", "destination": "/api/index?__path=/hero" }
+    { "source": "/api/(.*)", "destination": "/server.ts" },
+    { "source": "/files/(.*)", "destination": "/server.ts" },
+    { "source": "/public-files/(.*)", "destination": "/server.ts" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

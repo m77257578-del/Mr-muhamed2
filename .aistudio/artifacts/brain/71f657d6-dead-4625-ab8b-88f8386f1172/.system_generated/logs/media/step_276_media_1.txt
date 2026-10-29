@@ -1,0 +1,7 @@
+---
+type: "feature"
+title: "Use Google Search data"
+icon: "google"
+---
+
+You MUST add Search Grounding to the app where relevant to get up to date and accurate information. Use gemini-3.8-flash (with googleSearch tool)

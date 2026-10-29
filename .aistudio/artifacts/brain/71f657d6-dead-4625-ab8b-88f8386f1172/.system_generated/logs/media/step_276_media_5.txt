@@ -1,0 +1,13 @@
+---
+type: "feature"
+title: "Three.js 3D scenes"
+icon: "3d_rotation"
+---
+
+I want to use Three.js in this app. You **MUST** use the `threejs` skill for this.
+
+Follow these 3D scene and procedural craft guidelines:
+- **Composite 3–12 Part Procedural Models**: Never represent a hero subject, vehicle, tree, or structure with a single default primitive (`BoxGeometry`, `SphereGeometry`, etc.). Assemble subjects as a `THREE.Group` of 3–12 distinct parts across primary silhouette, secondary details, and accents (using bevels, `LatheGeometry`, or `TubeGeometry`), vary `roughness`/`metalness` across adjacent parts, and pivot props at bottom-center flush with the ground plus soft radial contact shadows.
+- **Studio PBR Lighting, Surfaces & Atmosphere**: Enable `ACESFilmicToneMapping` and `RoomEnvironment` with `PMREMGenerator` for realistic metallic/roughness reflections. Pair a warm directional key light (with a tight shadow frustum) against a cool `HemisphereLight` fill, match `Fog` / `FogExp2` to the horizon/sky color, and use procedural `CanvasTexture` bump/roughness maps or custom shaders (never fetch external texture or `.hdr` URLs that can 404).
+- **Damped Camera & Lossless 60fps Loop**: Mount the WebGL `<canvas>` in a stable ref container outside re-rendering React UI, share geometries/materials (`InstancedMesh` for >20 repeated items, pre-allocated scratch `Vector3`/`Matrix4` objects in `requestAnimationFrame`), and smooth camera movement/OrbitControls with exponential damping (`1 - Math.exp(-k * dt)`).
+- **Viewport-First Controls**: Keep the 3D canvas full-bleed (`100vw x 100vh`) with a compact, collapsible floating control dock (`<= 15%` viewport footprint, using solid/`rgba` surfaces instead of `backdrop-filter` over WebGL).

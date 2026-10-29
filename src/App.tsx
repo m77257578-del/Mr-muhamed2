@@ -8,6 +8,7 @@ import { ParentSpace } from './components/ParentSpace';
 import { TeacherSpace } from './components/TeacherSpace';
 import { MediaViewer } from './components/MediaViewer';
 import { ExamModal } from './components/ExamModal';
+import { AuthModal } from './components/AuthModal';
 import {
   PublicData,
   StudentData,
@@ -36,6 +37,7 @@ export function App() {
   // Modals
   const [activeMedia, setActiveMedia] = useState<CourseContentItem | null>(null);
   const [activeExam, setActiveExam] = useState<Exam | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
   // PWA install prompt
   const [installPrompt, setInstallPrompt] = useState<any>(null);
@@ -75,6 +77,38 @@ export function App() {
   useEffect(() => {
     document.body.dataset.theme = theme;
   }, [theme]);
+
+  // Apply Dynamic Colors, Fonts & CSS Variables
+  useEffect(() => {
+    if (publicData) {
+      const root = document.documentElement;
+      if (publicData.primaryColor) {
+        root.style.setProperty('--primary-blue', publicData.primaryColor);
+        root.style.setProperty('--primary-theme', publicData.primaryColor);
+      }
+      if (publicData.headingColor) {
+        root.style.setProperty('--heading-theme', publicData.headingColor);
+      }
+      if (publicData.textColor) {
+        root.style.setProperty('--text-main', publicData.textColor);
+      }
+      if (publicData.panelBg) {
+        root.style.setProperty('--bg-panel', publicData.panelBg);
+      }
+      if (publicData.cardBg) {
+        root.style.setProperty('--bg-card', publicData.cardBg);
+      }
+      if (publicData.accentGold) {
+        root.style.setProperty('--accent-gold', publicData.accentGold);
+      }
+      if (publicData.fontFamily) {
+        document.body.style.fontFamily = publicData.fontFamily;
+      }
+      if (publicData.bgPattern) {
+        document.body.dataset.pattern = publicData.bgPattern;
+      }
+    }
+  }, [publicData]);
 
   // Load public data
   const loadPublic = async () => {
@@ -142,9 +176,16 @@ export function App() {
 
   useEffect(() => {
     loadPublic();
-    if (tokens.student) loadStudent();
-    if (tokens.parent) loadParent();
-    if (tokens.teacher) loadTeacher();
+    if (tokens.teacher) {
+      loadTeacher();
+      setActiveTab('teacher');
+    } else if (tokens.student) {
+      loadStudent();
+      setActiveTab('student');
+    } else if (tokens.parent) {
+      loadParent();
+      setActiveTab('parent');
+    }
   }, []);
 
   const currentUserRole = tokens.teacher
@@ -165,11 +206,21 @@ export function App() {
       : '';
 
   const handleLoginClick = () => {
-    setActiveTab('student');
-    setTimeout(() => {
-      const el = document.getElementById('s-auth');
-      if (el) el.scrollIntoView({ behavior: 'smooth' });
-    }, 50);
+    setIsAuthModalOpen(true);
+  };
+
+  const handleLoginSuccess = async (role: 'student' | 'parent' | 'teacher') => {
+    setIsAuthModalOpen(false);
+    if (role === 'student') {
+      await loadStudent();
+      setActiveTab('student');
+    } else if (role === 'parent') {
+      await loadParent();
+      setActiveTab('parent');
+    } else if (role === 'teacher') {
+      await loadTeacher();
+      setActiveTab('teacher');
+    }
   };
 
   const handleGlobalLogout = () => {
@@ -210,7 +261,7 @@ export function App() {
         <nav className="mx-auto mt-6 grid max-w-6xl grid-cols-2 gap-2 px-4 sm:px-8">
           <button
             type="button"
-            className={`rounded-t-2xl py-3.5 font-extrabold text-base transition-all border-t border-x ${
+            className={`rounded-t-2xl py-3.5 font-extrabold text-base transition-all border-t border-x cursor-pointer ${
               activeTab === 'student'
                 ? 'bg-[#0f1b2d] text-cyan-300 border-cyan-400/50 border-b-4 border-b-cyan-400 shadow-xl'
                 : 'bg-[#0a1220]/80 text-slate-400 hover:text-slate-200 border-slate-800'
@@ -221,7 +272,7 @@ export function App() {
           </button>
           <button
             type="button"
-            className={`rounded-t-2xl py-3.5 font-extrabold text-base transition-all border-t border-x ${
+            className={`rounded-t-2xl py-3.5 font-extrabold text-base transition-all border-t border-x cursor-pointer ${
               activeTab === 'parent'
                 ? 'bg-[#0f1b2d] text-cyan-300 border-cyan-400/50 border-b-4 border-b-cyan-400 shadow-xl'
                 : 'bg-[#0a1220]/80 text-slate-400 hover:text-slate-200 border-slate-800'
@@ -241,6 +292,7 @@ export function App() {
               onRefresh={loadStudent}
               onOpenMedia={(c) => setActiveMedia(c)}
               onStartExam={(e) => setActiveExam(e)}
+              onOpenAuthModal={handleLoginClick}
               onSwitchToTeacher={async () => {
                 await loadTeacher();
                 setActiveTab('teacher');
@@ -295,6 +347,13 @@ export function App() {
 
       {/* Social Media Links & Learn Web Enter Button Footer */}
       <Footer socialLinks={publicData?.socialLinks} />
+
+      {/* Dedicated Auth Modal (The ONLY way to log in as requested) */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onLoginSuccess={handleLoginSuccess}
+      />
 
       {/* Media Viewer Modal */}
       {activeMedia && (

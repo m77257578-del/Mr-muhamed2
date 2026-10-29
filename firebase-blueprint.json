@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "student": {
+      "title": "Student Device Tracking",
+      "description": "Stores device IDs and login activity for students.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "deviceIds": { "type": "array" },
+        "lastLogin": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "deviceIds"]
+    },
+    "attendance": {
+      "title": "Live Attendance Record",
+      "description": "Records student attendance for live sessions via QR.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "sessionTitle": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "studentPhone": { "type": "string" },
+        "grade": { "type": "string" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "status": { "type": "string" },
+        "type": { "type": "string" }
+      },
+      "required": ["id", "sessionId", "studentId", "joinedAt"]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": "student",
+      "description": "Collection of student device tracking documents."
+    },
+    "/live_attendance/{attendanceId}": {
+      "schema": "attendance",
+      "description": "Collection of attendance records."
+    }
+  }
+}

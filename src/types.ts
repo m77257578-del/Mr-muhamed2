@@ -5,12 +5,10 @@ export type Grade =
   | 'الصف الأول الإعدادي'
   | 'الصف الثاني الإعدادي'
   | 'الصف الثالث الإعدادي'
-  | 'الصف الأول الثانوي – عام'
-  | 'الصف الأول الثانوي – بكالوريا'
+  | 'الصف الأول الثانوي'
   | 'الصف الثاني الثانوي – عام'
   | 'الصف الثاني الثانوي – بكالوريا'
-  | 'الصف الثالث الثانوي – عام'
-  | 'الصف الثالث الثانوي – بكالوريا'
+  | 'الصف الثالث الثانوي'
   | 'كل الصفوف';
 
 export const GRADES: Grade[] = [
@@ -20,12 +18,10 @@ export const GRADES: Grade[] = [
   'الصف الأول الإعدادي',
   'الصف الثاني الإعدادي',
   'الصف الثالث الإعدادي',
-  'الصف الأول الثانوي – عام',
-  'الصف الأول الثانوي – بكالوريا',
+  'الصف الأول الثانوي',
   'الصف الثاني الثانوي – عام',
   'الصف الثاني الثانوي – بكالوريا',
-  'الصف الثالث الثانوي – عام',
-  'الصف الثالث الثانوي – بكالوريا',
+  'الصف الثالث الثانوي',
 ];
 
 export interface Course {
@@ -58,6 +54,7 @@ export interface CourseContentItem {
   url?: string;
   isFree?: boolean;
   blocked?: string[];
+  lecture?: string;
   created?: string;
 }
 
@@ -67,7 +64,7 @@ export interface Exam {
   grade: string;
   courseId?: string;
   type: 'اختياري' | 'مقالي' | 'مختلط';
-  questions: (string | { text: string })[];
+  questions: (string | { text: string; points?: number })[];
   kinds?: ('mcq' | 'essay')[] | null;
   options?: string[][];
   key?: (string | null)[] | string | null;
@@ -75,6 +72,16 @@ export interface Exam {
   modelAnswer?: string;
   taken?: boolean;
   created?: string;
+}
+
+export interface QuestionFeedbackItem {
+  questionIndex: number;
+  questionText?: string;
+  studentAnswer: string;
+  modelAnswer?: string;
+  score: number;
+  maxScore: number;
+  feedback: string;
 }
 
 export interface ExamResult {
@@ -89,6 +96,8 @@ export interface ExamResult {
   label?: string;
   status: 'pending' | 'graded';
   aiGraded?: boolean;
+  aiFeedback?: string;
+  questionFeedback?: QuestionFeedbackItem[];
   created: string;
   appeal?: {
     id: string;
@@ -106,6 +115,7 @@ export interface Notice {
   kind: 'announcement' | 'schedule';
   text: string;
   grade: string;
+  imageUrl?: string;
   created: string;
 }
 
@@ -122,6 +132,20 @@ export interface Message {
   name: string;
   text: string;
   reply: string;
+  created: string;
+}
+
+export interface LiveSession {
+  id: string;
+  title: string;
+  grade: string;
+  courseId?: string;
+  courseTitle?: string;
+  meetUrl: string;
+  meetCode?: string;
+  status: 'active' | 'scheduled' | 'ended' | 'live' | 'upcoming';
+  scheduledAt: string;
+  notes?: string;
   created: string;
 }
 
@@ -160,6 +184,18 @@ export interface WalletTransaction {
   reviewedAt?: string;
 }
 
+export interface Coupon {
+  id: string;
+  code: string;
+  discountType: 'percentage' | 'fixed' | 'free_course';
+  discountValue: number;
+  courseId?: string;
+  maxUses?: number;
+  usedCount: number;
+  expiresAt: string;
+  created: string;
+}
+
 export interface StudentProfile {
   name: string;
   grade: string;
@@ -167,6 +203,9 @@ export interface StudentProfile {
   subEnd?: string;
   sub: boolean;
   phone: string;
+  governorate?: string;
+  parentName?: string;
+  parentPhone?: string;
   walletBalance?: number;
 }
 
@@ -182,6 +221,8 @@ export interface StudentData {
   gateways?: ManualGateway[];
   walletTransactions?: WalletTransaction[];
   onlinePay?: boolean;
+  liveSessions?: LiveSession[];
+  coupons?: Coupon[];
 }
 
 export interface ParentProgress {
@@ -205,6 +246,7 @@ export interface ParentData {
   subEnd?: string;
   results: ExamResult[];
   progress: ParentProgress;
+  liveSessions?: LiveSession[];
 }
 
 export interface PaymentMethod {
@@ -229,6 +271,10 @@ export interface PublicData {
   primaryColor?: string;
   headingColor?: string;
   textColor?: string;
+  fontFamily?: string;
+  panelBg?: string;
+  cardBg?: string;
+  accentGold?: string;
   pageThemes?: Record<string, any>;
   academicColors?: Record<string, any>;
   studentTabsVisibility?: Record<string, boolean>;
@@ -240,14 +286,20 @@ export interface PublicData {
   courses: Course[];
   socialLinks?: SocialLink[];
   gateways?: ManualGateway[];
+  liveSessions?: LiveSession[];
 }
 
 export interface ActivationCode {
   id: string;
+  code?: string;
   hint: string;
   days: number;
   courseId: string;
+  courseTitle?: string;
   status: 'unused' | 'used' | 'cancelled';
+  usedBy?: string;
+  usedByName?: string;
+  usedAt?: string;
   created: string;
 }
 
@@ -272,6 +324,10 @@ export interface TeacherData {
   primaryColor?: string;
   headingColor?: string;
   textColor?: string;
+  fontFamily?: string;
+  panelBg?: string;
+  cardBg?: string;
+  accentGold?: string;
   pageThemes?: Record<string, any>;
   academicColors?: Record<string, any>;
   studentTabsVisibility?: Record<string, boolean>;
@@ -299,5 +355,9 @@ export interface TeacherData {
   walletTransactions?: WalletTransaction[];
   walletRechargeRequests?: WalletTransaction[];
   packageOrders?: any[];
+  liveSessions?: LiveSession[];
+  liveAttendance?: any[];
+  coupons?: Coupon[];
+  supervisors?: any[];
 }
 

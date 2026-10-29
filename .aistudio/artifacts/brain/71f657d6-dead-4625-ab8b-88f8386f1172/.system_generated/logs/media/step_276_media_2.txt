@@ -1,0 +1,7 @@
+---
+type: "feature"
+title: "Add voice conversations"
+icon: "audio_spark"
+---
+
+Add functionality to the app for users to use model gemini-3.8-live (Live API) in their app. This will allow users to have a conversation with the app and get responses from Live API in real-time.

@@ -1,26 +1,72 @@
 const BASE_URL = '';
 
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem('x-device-id');
+    if (!id) {
+      id = 'dev-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+      localStorage.setItem('x-device-id', id);
+    }
+    return id;
+  } catch {
+    return 'unknown';
+  }
+}
+
 export const tokens = {
   get student() {
-    return sessionStorage.getItem('st') || '';
+    try {
+      return localStorage.getItem('st') || sessionStorage.getItem('st') || '';
+    } catch {
+      return '';
+    }
   },
   set student(v: string) {
-    if (v) sessionStorage.setItem('st', v);
-    else sessionStorage.removeItem('st');
+    try {
+      if (v) {
+        localStorage.setItem('st', v);
+        sessionStorage.setItem('st', v);
+      } else {
+        localStorage.removeItem('st');
+        sessionStorage.removeItem('st');
+      }
+    } catch {}
   },
   get parent() {
-    return sessionStorage.getItem('pt') || '';
+    try {
+      return localStorage.getItem('pt') || sessionStorage.getItem('pt') || '';
+    } catch {
+      return '';
+    }
   },
   set parent(v: string) {
-    if (v) sessionStorage.setItem('pt', v);
-    else sessionStorage.removeItem('pt');
+    try {
+      if (v) {
+        localStorage.setItem('pt', v);
+        sessionStorage.setItem('pt', v);
+      } else {
+        localStorage.removeItem('pt');
+        sessionStorage.removeItem('pt');
+      }
+    } catch {}
   },
   get teacher() {
-    return sessionStorage.getItem('tt') || '';
+    try {
+      return localStorage.getItem('tt') || sessionStorage.getItem('tt') || '';
+    } catch {
+      return '';
+    }
   },
   set teacher(v: string) {
-    if (v) sessionStorage.setItem('tt', v);
-    else sessionStorage.removeItem('tt');
+    try {
+      if (v) {
+        localStorage.setItem('tt', v);
+        sessionStorage.setItem('tt', v);
+      } else {
+        localStorage.removeItem('tt');
+        sessionStorage.removeItem('tt');
+      }
+    } catch {}
   },
 };
 
@@ -33,6 +79,7 @@ export async function apiRequest<T = any>(
   const token = role === 'public' ? '' : tokens[role];
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'x-device-id': getDeviceId(),
   };
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
@@ -75,6 +122,7 @@ export async function uploadFile(
       xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     }
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.setRequestHeader('x-device-id', getDeviceId());
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) {

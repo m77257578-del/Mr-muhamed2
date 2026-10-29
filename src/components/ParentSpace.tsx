@@ -38,7 +38,21 @@ export const ParentSpace: React.FC<ParentSpaceProps> = ({
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'results' | 'attendance'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'results' | 'attendance' | 'meetAttendance'>('overview');
+  const [liveLogs, setLiveLogs] = useState<any[]>([]);
+  const [liveLoading, setLiveLoading] = useState(false);
+
+  const fetchLiveLogs = async () => {
+    setLiveLoading(true);
+    try {
+      const res = await apiRequest<any>('parent', '/api/parent/live-attendance');
+      setLiveLogs(res.attendanceLogs || []);
+    } catch {
+      setLiveLogs([]);
+    } finally {
+      setLiveLoading(false);
+    }
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -173,6 +187,7 @@ export const ParentSpace: React.FC<ParentSpaceProps> = ({
             { id: 'overview', label: '📊 ملخص تقرير الطالب والنشاط', icon: Home },
             { id: 'results', label: '🏆 النتائج والشهادات التفصيلية', icon: Award },
             { id: 'attendance', label: '🏫 كود الحضور وبار كود السنتر', icon: QrCode },
+            { id: 'meetAttendance', label: '🔴 سجل حضور البث المباشر (Google Meet)', icon: Video },
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -180,7 +195,10 @@ export const ParentSpace: React.FC<ParentSpaceProps> = ({
               <button
                 key={tab.id}
                 type="button"
-                onClick={() => setActiveTab(tab.id as any)}
+                onClick={() => {
+                  setActiveTab(tab.id as any);
+                  if (tab.id === 'meetAttendance') fetchLiveLogs();
+                }}
                 className={`py-2.5 px-4 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
                   isActive
                     ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white shadow border border-cyan-400/40'
@@ -335,6 +353,53 @@ export const ParentSpace: React.FC<ParentSpaceProps> = ({
             <Printer className="w-4 h-4" />
             <span>طباعة بطاقة الحضور</span>
           </button>
+        </section>
+      )}
+
+      {/* TAB 4: GOOGLE MEET LIVE ATTENDANCE LOGS */}
+      {activeTab === 'meetAttendance' && (
+        <section className="panel bg-[#0f1b2d] border border-cyan-500/30 space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-cyan-500/20">
+            <div>
+              <h2 className="text-lg font-extrabold text-white flex items-center gap-2">
+                <CheckCircle className="w-5 h-5 text-emerald-400" />
+                <span>سجل حضور الطالب في جلسات البث المباشر (Google Meet)</span>
+              </h2>
+              <p className="text-xs text-slate-300 mt-0.5">
+                موثق آلياً من الخادم فور ضغط ابنك على رابط البث المباشر المتاح على المنصة.
+              </p>
+            </div>
+            <button
+              onClick={fetchLiveLogs}
+              className="btn-cyan btn-sm text-xs font-bold"
+            >
+              {liveLoading ? 'جاري التحميل...' : 'تحديث السجل'}
+            </button>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {liveLogs.length ? (
+              liveLogs.map((log) => (
+                <div key={log.id} className="card bg-[#111f36] border border-cyan-500/20 p-3.5 flex items-center justify-between">
+                  <div>
+                    <h3 className="font-extrabold text-sm text-white">{log.sessionTitle || 'بث مباشر'}</h3>
+                    <p className="text-xs text-slate-400 mt-1 font-mono">
+                      📅 الموعد: {new Date(log.joinedAt).toLocaleString('ar-EG')}
+                    </p>
+                  </div>
+                  <div className="text-left">
+                    <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40">
+                      {log.status || 'حاضر آلياً'}
+                    </span>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-xs text-slate-400 col-span-2 py-4">
+                لا توجد سجلات حضور للبث المباشر مسجلة حتى الآن لابنك. عند مشاركة ابنك في أي حلقة بث مباشر عبر المنصة، سيظهر السجل والتاريخ هنا فوراً.
+              </p>
+            )}
+          </div>
         </section>
       )}
     </div>

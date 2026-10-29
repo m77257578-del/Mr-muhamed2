@@ -1,0 +1,7 @@
+---
+type: "feature"
+title: "Add database and auth"
+logoUrl: "https://www.gstatic.com/mobilesdk/250721_mobilesdk/mono_firebase_dark.svg"
+---
+
+You MUST connect the app to Firebase. Add functionality that uses Google Sign-in with Firebase Auth to securely identify users, and add data persistence to keep track of user data with Firestore.

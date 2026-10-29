@@ -46,7 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
       ? publicData.hero.startsWith('http') || publicData.hero.startsWith('/')
         ? publicData.hero
         : `/${publicData.hero}`
-      : 'https://images.pexels.com/photos/159711/books-bookstore-book-reading-159711.jpeg?auto=compress&cs=tinysrgb&w=1280';
+      : '/src/assets/images/platform_hero_banner_1793297587244.jpg';
 
   return (
     <header className="px-4 pt-5 sm:px-8">

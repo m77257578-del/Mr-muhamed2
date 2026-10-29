@@ -44,6 +44,42 @@ export const StudentWallet: React.FC<StudentWalletProps> = ({
   const [previewReceiptUrl, setPreviewReceiptUrl] = useState<string | null>(null);
   const [copiedAccount, setCopiedAccount] = useState<string | null>(null);
 
+  // Hidden Cashier Mode state
+  const [isCashierUnlocked, setIsCashierUnlocked] = useState(() => {
+    try {
+      return localStorage.getItem('cashier_unlocked') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [cashierKeyInput, setCashierKeyInput] = useState('');
+  const [cashierStatus, setCashierStatus] = useState<string | null>(null);
+  const [showCashierInput, setShowCashierInput] = useState(false);
+  const [clickCount, setClickCount] = useState(0);
+
+  const handleCashierUnlock = async () => {
+    try {
+      const res = await apiRequest('student', '/api/student/cashier-unlock', { key: cashierKeyInput });
+      if (res.ok) {
+        setIsCashierUnlocked(true);
+        localStorage.setItem('cashier_unlocked', 'true');
+        setCashierStatus(null);
+        setShowCashierInput(false);
+      }
+    } catch (err: any) {
+      setCashierStatus(err.message || 'الكود غير صحيح');
+    }
+  };
+
+  const handleTitleClick = () => {
+    const next = clickCount + 1;
+    setClickCount(next);
+    if (next >= 5) {
+      setShowCashierInput(true);
+      setClickCount(0);
+    }
+  };
+
   const balance = profile.walletBalance || 0;
 
   const handleCopyAccount = (acc: string) => {
@@ -108,13 +144,18 @@ export const StudentWallet: React.FC<StudentWalletProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-6 relative z-10">
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <span className="badge-pill bg-cyan-950/60 text-cyan-300 border-cyan-400/30">
+              <span 
+                className="badge-pill bg-cyan-950/60 text-cyan-300 border-cyan-400/30 cursor-pointer select-none"
+                onClick={handleTitleClick}
+              >
                 <Wallet className="w-3.5 h-3.5" />
                 <span>محفظتي الإلكترونية</span>
               </span>
-              <span className="badge-pill bg-emerald-950/60 text-emerald-300 border-emerald-500/30">
-                آمن ومباشر
-              </span>
+              {isCashierUnlocked && (
+                <span className="badge-pill bg-emerald-950/60 text-emerald-300 border-emerald-500/30">
+                  آمن ومباشر
+                </span>
+              )}
             </div>
             <h2 className="text-2xl sm:text-3xl font-black text-white">رصيد حسابك الحالي</h2>
             <div className="flex items-baseline gap-2">
@@ -129,14 +170,35 @@ export const StudentWallet: React.FC<StudentWalletProps> = ({
           </div>
 
           <div className="flex flex-col sm:flex-row gap-3">
-            <button
-              type="button"
-              onClick={() => setShowDepositModal(true)}
-              className="btn-gold py-3.5 px-6 font-black text-sm flex items-center justify-center gap-2 shadow-lg hover:scale-105 transition-transform"
-            >
-              <PlusCircle className="w-5 h-5" />
-              <span>شحن رصيد المحفظة الآن</span>
-            </button>
+            {isCashierUnlocked && (
+              <button
+                type="button"
+                onClick={() => setShowDepositModal(true)}
+                className="btn-gold py-3.5 px-6 font-black text-sm flex items-center justify-center gap-2 shadow-lg hover:scale-105 transition-transform"
+              >
+                <PlusCircle className="w-5 h-5" />
+                <span>شحن رصيد المحفظة الآن</span>
+              </button>
+            )}
+            {showCashierInput && (
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  placeholder="كود التفعيل"
+                  className="input-field text-xs w-32"
+                  value={cashierKeyInput}
+                  onChange={(e) => setCashierKeyInput(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={handleCashierUnlock}
+                  className="btn-cyan btn-sm text-[11px]"
+                >
+                  تفعيل
+                </button>
+              </div>
+            )}
+            {cashierStatus && <p className="text-[10px] text-red-400">{cashierStatus}</p>}
             <button
               type="button"
               onClick={() => onRefresh()}
@@ -151,7 +213,7 @@ export const StudentWallet: React.FC<StudentWalletProps> = ({
       </div>
 
       {/* Payment Gateways Guidelines Section */}
-      {gateways.length > 0 && (
+      {isCashierUnlocked && gateways.length > 0 && (
         <div className="panel bg-[#0f1b2d] border border-blue-500/20 space-y-4">
           <div className="flex items-center gap-2 border-b border-blue-500/15 pb-2">
             <CreditCard className="w-5 h-5 text-amber-400" />

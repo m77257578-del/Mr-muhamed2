@@ -3,6 +3,16 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import cors from 'cors';
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
+import * as admin from 'firebase-admin';
+import firebaseConfig from './firebase-applet-config.json';
+
+// Initialize Firebase Admin for token verification
+if (!admin.apps.length) {
+  admin.initializeApp({
+    projectId: firebaseConfig.projectId,
+  });
+}
 
 // Read .env if present
 try {
@@ -85,12 +95,20 @@ interface Database {
     primaryColor?: string;
     headingColor?: string;
     textColor?: string;
+    fontFamily?: string;
+    panelBg?: string;
+    cardBg?: string;
+    accentGold?: string;
+    geminiKeys?: string;
+    geminiModel?: string;
     pageThemes?: Record<string, any>;
     academicColors?: Record<string, any>;
     studentTabsVisibility?: Record<string, boolean>;
     registrationFieldsConfig?: Record<string, any>;
     reviewsConfig?: Record<string, any>;
     notificationConfig?: Record<string, any>;
+    onlinePayKey?: string;
+    cashierKey?: string;
   };
   students: any[];
   parents: any[];
@@ -116,6 +134,12 @@ interface Database {
   }[];
   gateways: ManualGateway[];
   walletTransactions: WalletTransaction[];
+  liveSessions: any[];
+  liveAttendance: any[];
+  coupons: any[];
+  supervisors: any[];
+  bundles: any[];
+  affiliates: any[];
 }
 
 const defaultSocialLinks = [
@@ -182,6 +206,7 @@ const freshDb = (): Database => ({
     pepper: rnd(16),
     teacher: '',
     onlinePay: false,
+    onlinePayKey: '',
     logoSize: 36,
     bgPattern: 'gradient',
     primaryColor: '#0284c7',
@@ -200,7 +225,8 @@ const freshDb = (): Database => ({
       privateLessons: true,
       certificates: true,
       wallet: true
-    }
+    },
+    cashierKey: 'CASHIER-' + rnd(4).toUpperCase()
   },
   students: [],
   parents: [],
@@ -219,7 +245,12 @@ const freshDb = (): Database => ({
   mediaBank: [],
   socialLinks: [...defaultSocialLinks],
   gateways: [...defaultGateways],
-  walletTransactions: []
+  walletTransactions: [],
+  liveSessions: [],
+  coupons: [],
+  supervisors: [],
+  bundles: [],
+  affiliates: []
 });
 
 let db: Database = freshDb();
@@ -227,6 +258,15 @@ if (fs.existsSync(DBF)) {
   try {
     db = Object.assign(freshDb(), JSON.parse(fs.readFileSync(DBF, 'utf8')));
     db.settings.name = 'تصميم ليرن ويب';
+    if (!db.supervisors || !Array.isArray(db.supervisors)) {
+      db.supervisors = [];
+    }
+    if (!db.liveSessions || !Array.isArray(db.liveSessions)) {
+      db.liveSessions = [];
+    }
+    if (!db.liveAttendance || !Array.isArray(db.liveAttendance)) {
+      db.liveAttendance = [];
+    }
     if (!db.socialLinks || !Array.isArray(db.socialLinks) || db.socialLinks.length === 0) {
       db.socialLinks = [...defaultSocialLinks];
     }
@@ -236,8 +276,17 @@ if (fs.existsSync(DBF)) {
     if (!db.walletTransactions || !Array.isArray(db.walletTransactions)) {
       db.walletTransactions = [];
     }
+    if (!db.bundles || !Array.isArray(db.bundles)) {
+      db.bundles = [];
+    }
+    if (!db.affiliates || !Array.isArray(db.affiliates)) {
+      db.affiliates = [];
+    }
     if (db.settings.onlinePay === undefined) {
       db.settings.onlinePay = false;
+    }
+    if (db.settings.onlinePayKey === undefined) {
+      db.settings.onlinePayKey = '';
     }
     // Ensure every student has walletBalance
     for (const st of db.students) {
@@ -276,9 +325,9 @@ save();
 
 // Auth Sessions
 const sessionSecret = () => process.env.SESSION_SECRET || (db.settings.pepper + db.settings.salt);
-const newSession = (role: string, id: string) => {
+const newSession = (role: string, id: string, extra: any = {}) => {
   const exp = Date.now() + 7 * 864e5;
-  const payload = Buffer.from(JSON.stringify({ role, id, exp })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ role, id, exp, ...extra })).toString('base64url');
   const signature = crypto.createHmac('sha256', sessionSecret()).update(payload).digest('base64url');
   return payload + '.' + signature;
 };
@@ -302,7 +351,53 @@ function auth(req: Request, role?: string | null) {
   if (!s || s.exp < Date.now() || (role && s.role !== role)) {
     throw E(401, 'سجّل الدخول من جديد');
   }
+
+  // Multi-device verification check on every request for students
+  if (s.role === 'student') {
+    const deviceId = req.headers['x-device-id'] as string || 'unknown';
+    // We will verify this deviceId matches what's in Firestore for this student
+    // This is handled in the middleware or checked here if we want strictness.
+    // However, to avoid excessive Firestore reads, we might rely on the token containing the deviceId
+    // and just checking if it matches the current request header.
+    const tokenDeviceId = s.did; 
+    if (tokenDeviceId && deviceId !== 'unknown' && deviceId !== tokenDeviceId) {
+       throw E(403, 'تم اكتشاف تسجيل دخول من جهاز آخر. يرجى تسجيل الدخول مجدداً من هذا الجهاز.');
+    }
+  }
+
   return s;
+}
+
+// Firebase Initialization (Admin SDK preferred on server)
+const firestore = admin.firestore();
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {},
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
 }
 
 const subActive = (s: any) => !!s.subEnd && new Date(s.subEnd) > new Date();
@@ -365,6 +460,9 @@ function studentView(s: any) {
       subEnd: s.subEnd,
       sub,
       phone: s.phone,
+      governorate: s.governorate || '',
+      parentName: s.parentName || '',
+      parentPhone: s.parentPhone || '',
       walletBalance: Number(s.walletBalance) || 0
     },
     courses,
@@ -391,6 +489,8 @@ function studentView(s: any) {
       .filter(r => r.studentId === s.id)
       .map(r => ({ ...r, appeal: db.appeals.find(a => a.resultId === r.id) || null })),
     messages: db.messages.filter(m => m.studentId === s.id),
+    notices: (db.notices || []).filter(n => n.grade === 'كل الصفوف' || n.grade === s.grade),
+    liveSessions: (db.liveSessions || []).filter(ls => ls.status !== 'ended' && (ls.grade === 'كل الصفوف' || ls.grade === s.grade)),
     notes: (db.notes || []).filter(n => n.studentId === s.id).sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime()),
     gateways: (db.gateways || []).filter(g => g.active === true),
     walletTransactions: (db.walletTransactions || []).filter(t => t.studentId === s.id).sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime()),
@@ -401,15 +501,18 @@ function studentView(s: any) {
 const qKind = (e: any, i: number) => (e.kinds && e.kinds[i]) || (e.type === 'اختياري' ? 'mcq' : 'essay');
 
 // System 11: Gemini API Keys Rotator mechanism (Backend Vercel/Node)
+// Gemini SDK Initialization with Rotator
 function getGeminiApiKeys(): string[] {
-  const dbKeys = db.settings.geminiKeys || '';
+  const dbKeys = db?.settings?.geminiKeys || '';
   const envKeys = process.env.GEMINI_API_KEYS || '';
-  const singleKey = process.env.GEMINI_API_KEY || '';
+  const singleKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
   const combined = `${dbKeys}\n${envKeys}\n${singleKey}`;
-  const parsed = combined
-    .split(/[,;\n]/)
-    .map(k => k.trim())
-    .filter(k => k.length > 5);
+  const parsed = Array.from(new Set(
+    combined
+      .split(/[,;\n]/)
+      .map(k => k.trim())
+      .filter(k => k.length > 5)
+  ));
   return parsed.length > 0 ? parsed : ['AIzaSyDummyKeyFallback'];
 }
 
@@ -421,81 +524,83 @@ function getNextGeminiKey(): string {
   return key;
 }
 
-async function callGeminiWithRotation(payload: any, systemInstruction?: string, isJson: boolean = false): Promise<{ text: string; json?: any }> {
+/**
+ * Enhanced Gemini caller using @google/genai SDK with Search Grounding
+ */
+async function callGeminiSDK(params: {
+  contents: any;
+  systemInstruction?: string;
+  isJson?: boolean;
+  useSearch?: boolean;
+}): Promise<{ text: string; groundingMetadata?: any }> {
   const keys = getGeminiApiKeys();
-  const model = db.settings.geminiModel || process.env.GEMINI_MODEL || 'gemini-1.5-flash';
-  let lastError: any = null;
-
+  const configuredModel = db?.settings?.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+  
+  // Try available keys
   for (let attempt = 0; attempt < Math.max(keys.length, 1); attempt++) {
-    const activeKey = getNextGeminiKey();
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), 28000);
+    const apiKey = getNextGeminiKey();
+    if (apiKey === 'AIzaSyDummyKeyFallback') break;
+
+    const genAI = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+    });
+
     try {
-      const bodyPayload: any = {
-        contents: payload
+      const config: any = {
+        systemInstruction: params.systemInstruction,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM }
       };
-      if (systemInstruction) {
-        bodyPayload.systemInstruction = {
-          parts: [{ text: systemInstruction }]
-        };
-      }
-      if (isJson) {
-        bodyPayload.generationConfig = {
-          responseMimeType: 'application/json',
-          temperature: 0.1
-        };
+
+      if (params.isJson) {
+        config.responseMimeType = 'application/json';
       }
 
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: 'POST',
-        signal: ctl.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': activeKey
-        },
-        body: JSON.stringify(bodyPayload)
+      const tools: any[] = [];
+      if (params.useSearch) {
+        tools.push({ googleSearch: {} });
+      }
+
+      const response = await genAI.models.generateContent({
+        model: configuredModel,
+        contents: params.contents,
+        config,
+        tools: tools.length > 0 ? tools : undefined
       });
 
-      if (res.status === 429 || res.status === 403) {
-        console.warn(`[Gemini Rotator] Key returned ${res.status}. Rotating to next API key...`);
-        lastError = new Error(`Rate limit or key error (status ${res.status})`);
-        continue;
-      }
-
-      const data = await res.json();
-      if (!res.ok) {
-        lastError = new Error(data?.error?.message || `HTTP ${res.status}`);
-        continue;
-      }
-
-      const text = data?.candidates?.[0]?.content?.parts?.map((x: any) => x.text || '').join('').trim() || '';
-      return { text, json: data };
+      return {
+        text: response.text || '',
+        groundingMetadata: (response as any).groundingMetadata
+      };
     } catch (err: any) {
-      lastError = err;
-    } finally {
-      clearTimeout(t);
+      console.error(`[Gemini SDK Error] Attempt ${attempt + 1}:`, err.message);
+      if (err.message?.includes('429') || err.message?.includes('403')) continue;
+      if (attempt === keys.length - 1) throw err;
     }
   }
 
-  throw lastError || new Error('All Gemini API keys exhausted or rate-limited.');
+  throw new Error('فشل الاتصال بـ Gemini. يرجى التحقق من مفاتيح API.');
 }
 
-const GEMINI_KEY = Boolean(process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEYS);
-
-async function askGemini(prompt: string): Promise<string> {
-  const res = await callGeminiWithRotation([{ role: 'user', parts: [{ text: prompt }] }]);
+async function askGemini(prompt: string, sysPrompt?: string, useSearch: boolean = true): Promise<string> {
+  const systemInstruction = sysPrompt || 'أنت المساعد الذكي التعليمي لمنصة الأستاذ محمد التعليمية. أجب على أسئلة الطالب واستفساراته في اللغة العربية والمناهج التعليمية بأسلوب مشجع، واضح، ومتقن، واشرح التفاصيل التعليمية بإجابات مفيدة ومنسقة.';
+  const res = await callGeminiSDK({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    systemInstruction,
+    useSearch
+  });
   return res.text;
 }
 
 async function gradeEssayAI(examOrQuestions: any, studentAnswers: string[]): Promise<number> {
-  const prompt = `أنت مصحح امتحانات خبير. قم بتصحيح إجابات الطالب المقالية بمقارنتها بنموذج الإجابة:
+  const prompt = `أنت مصحح امتحانات خبير في اللغة العربية والمناهج التعليمية. قم بتصحيح إجابات الطالب المقالية بمقارنتها بنموذج الإجابة المعتمد بدقة وموضوعية:
 الأسئلة ونموذج الإجابة:
 ${typeof examOrQuestions.modelAnswer === 'string' ? examOrQuestions.modelAnswer : JSON.stringify(examOrQuestions)}
 
 إجابات الطالب:
 ${studentAnswers.map((a, i) => `${i + 1}. ${a}`).join('\n')}
 
-أعد رقم الدرجة الإجمالية فقط كعدد صحيح أو رقم بدون نصوص إضافية.`;
+أعد رقم الدرجة الإجمالية فقط كعدد صحيح أو رقم عشري بدون نصوص إضافية.`;
 
   try {
     const res = await callGeminiWithRotation([{ role: 'user', parts: [{ text: prompt }] }]);
@@ -504,6 +609,162 @@ ${studentAnswers.map((a, i) => `${i + 1}. ${a}`).join('\n')}
   } catch {
     return 0;
   }
+}
+
+async function gradeFullExamSubmissionWithAI(exam: any, answers: string[], notebookImageBase64?: string | null) {
+  const n = exam.questions.length;
+  const questionsList = exam.questions.map((q: any, i: number) => {
+    const text = typeof q === 'string' ? q : q.text || '';
+    const kind = (exam.kinds && exam.kinds[i]) || (exam.type === 'اختياري' ? 'mcq' : 'essay');
+    const modelAns = (exam.models && exam.models[i]) || (exam.modelAnswer || '');
+    const correctKey = Array.isArray(exam.key) ? exam.key[i] : (exam.key || '');
+    const studentAns = answers[i] || '';
+    return { index: i, text, kind, modelAns, correctKey, studentAns };
+  });
+
+  // Calculate MCQ score deterministically first
+  let mcqEarned = 0;
+  let mcqTotal = 0;
+  const questionFeedback: any[] = [];
+
+  const essayQuestions: any[] = [];
+
+  for (const item of questionsList) {
+    if (item.kind === 'mcq') {
+      mcqTotal++;
+      const isCorrect = item.studentAns && item.correctKey && item.studentAns.trim() === item.correctKey.trim();
+      if (isCorrect) mcqEarned++;
+      questionFeedback.push({
+        questionIndex: item.index + 1,
+        questionText: item.text,
+        studentAnswer: item.studentAns,
+        modelAnswer: `الاختيار الصحيح: (${item.correctKey})`,
+        score: isCorrect ? 1 : 0,
+        maxScore: 1,
+        feedback: isCorrect ? 'إجابة صحيحة ومطابقة للاختيار النموذجي ✓' : `إجابة خاطئة. الإجابة الصحيحة هي: (${item.correctKey})`
+      });
+    } else {
+      essayQuestions.push(item);
+    }
+  }
+
+  // If there are essay questions and we have Gemini available
+  let essayEarned = 0;
+  let generalFeedback = '';
+
+  if (essayQuestions.length > 0) {
+    const parts: any[] = [];
+    if (notebookImageBase64) {
+      const cleanB64 = String(notebookImageBase64).replace(/^data:image\/\w+;base64,/, '');
+      parts.push({
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: cleanB64
+        }
+      });
+    }
+
+    const promptText = `أنت مصحح امتحانات ومعلم خبير.
+قم بمطابقة وتصحيح إجابات الطالب المقالية مع نموذج الإجابة المعتمد بدقة وإنصاف تربوي.
+عنوان الامتحان: ${exam.title}
+
+الأسئلة المقالية ونموذج الإجابة:
+${essayQuestions.map(eq => `سؤال ${eq.index + 1}: ${eq.text}
+نموذج إجابة المعلم: ${eq.modelAns || exam.modelAnswer || 'الإجابة النموذجية المعتمدة'}
+إجابة الطالب: ${eq.studentAns || '(لم يجب الطالب)'}`).join('\n\n')}
+
+أعد التقييم بصيغة JSON فقط:
+{
+  "grades": [
+    {
+      "questionIndex": 1,
+      "score": 1,
+      "maxScore": 1,
+      "feedback": "ملاحظة توجيهية عن إجابة الطالب وما أحسن فيه وما ينقصه مقارنة بالنموذج"
+    }
+  ],
+  "totalEssayEarned": 0,
+  "overallFeedback": "تقرير عام موجز يوضح مستوى الطالب ونصائح التحسين"
+}`;
+
+    parts.push({ text: promptText });
+
+    try {
+      const aiRes = await callGeminiWithRotation([{ role: 'user', parts }], 'أنت مصحح امتحانات خبير. التزم بصيغة JSON حصراً.', true);
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(aiRes.text);
+      } catch {
+        const m = aiRes.text.match(/\{[\s\S]*\}/);
+        if (m) parsed = JSON.parse(m[0]);
+      }
+
+      if (parsed && Array.isArray(parsed.grades)) {
+        for (const g of parsed.grades) {
+          const eq = essayQuestions.find(e => e.index + 1 === g.questionIndex) || essayQuestions[0];
+          const sc = Number(g.score) || 0;
+          essayEarned += sc;
+          questionFeedback.push({
+            questionIndex: g.questionIndex || (eq.index + 1),
+            questionText: eq.text,
+            studentAnswer: eq.studentAns,
+            modelAnswer: eq.modelAns || exam.modelAnswer || '',
+            score: sc,
+            maxScore: Number(g.maxScore) || 1,
+            feedback: g.feedback || 'تم التقييم ومقارنة الإجابة بنموذج إجابة المعلم.'
+          });
+        }
+        generalFeedback = parsed.overallFeedback || '';
+      }
+    } catch (err) {
+      console.warn('Gemini essay grading error, using keyword heuristic fallback:', err);
+    }
+
+    // Heuristic fallback if AI failed or didn't return
+    if (questionFeedback.length < n) {
+      for (const eq of essayQuestions) {
+        if (!questionFeedback.some(qf => qf.questionIndex === eq.index + 1)) {
+          const modelWords = (eq.modelAns || '').split(/\s+/).filter((w: string) => w.length > 2);
+          const studentWords = (eq.studentAns || '').split(/\s+/).filter((w: string) => w.length > 2);
+          const matches = modelWords.filter((w: string) => studentWords.some((sw: string) => sw.includes(w) || w.includes(sw))).length;
+          const ratio = modelWords.length > 0 ? Math.min(1, matches / Math.max(modelWords.length * 0.5, 1)) : 0.8;
+          const sc = Math.round(ratio * 10) / 10;
+          essayEarned += sc;
+          questionFeedback.push({
+            questionIndex: eq.index + 1,
+            questionText: eq.text,
+            studentAnswer: eq.studentAns,
+            modelAnswer: eq.modelAns || exam.modelAnswer || '',
+            score: sc,
+            maxScore: 1,
+            feedback: sc >= 0.7 ? 'إجابة جيدة تغطي النقاط الجوهرية في نموذج الإجابة.' : 'إجابة تحتاج لمزيد من الاستفاضة والتفصيل وفق نموذج الإجابة.'
+          });
+        }
+      }
+    }
+  }
+
+  questionFeedback.sort((a, b) => a.questionIndex - b.questionIndex);
+
+  const totalScore = Math.min(n, Math.round((mcqEarned + essayEarned) * 10) / 10);
+  const percent = n > 0 ? (totalScore / n) * 100 : 0;
+  const gradeLabel = label(percent);
+
+  if (!generalFeedback) {
+    generalFeedback = percent >= 85
+      ? 'أداء ممتاز ورائع! إجاباتك نموذجية ومطابقة لأعلى معايير الإتقان.'
+      : percent >= 65
+      ? 'مستوى جيد ومبشر، يُرجى مراجعة الأسئلة التي بها ملاحظات للاستفادة الكاملة.'
+      : 'تحتاج إلى مراجعة الدرس ونموذج الإجابة المعتمد بعناية لرفع مستواك في الاختبارات القادمة.';
+  }
+
+  return {
+    total: n,
+    score: totalScore,
+    label: gradeLabel,
+    feedback: generalFeedback,
+    questionFeedback
+  };
 }
 
 // System 6: WhatsApp automated notifications engine
@@ -733,6 +994,10 @@ async function startServer() {
       primaryColor: db.settings.primaryColor || '#0284c7',
       headingColor: db.settings.headingColor || '#ffffff',
       textColor: db.settings.textColor || '#cbd5e1',
+      fontFamily: db.settings.fontFamily || "'Cairo', sans-serif",
+      panelBg: db.settings.panelBg || '#0d1728',
+      cardBg: db.settings.cardBg || '#111f36',
+      accentGold: db.settings.accentGold || '#f59e0b',
       pageThemes: db.settings.pageThemes || {},
       academicColors: db.settings.academicColors || {},
       studentTabsVisibility: db.settings.studentTabsVisibility || {},
@@ -743,7 +1008,9 @@ async function startServer() {
       hero: db.settings.heroFile ? '/hero?v=' + db.settings.heroV : '',
       courses: db.courses.filter(c => c.status === 'published').map(c => publicCourseView(c)),
       socialLinks: (db.socialLinks || []).filter(s => s.active !== false),
-      gateways: (db.gateways || []).filter(g => g.active === true)
+      gateways: (db.gateways || []).filter(g => g.active === true),
+      notices: (db.notices || []).slice(-10).reverse(),
+      liveSessions: (db.liveSessions || []).filter(s => s.status !== 'ended')
     });
   });
 
@@ -769,8 +1036,8 @@ async function startServer() {
         phone,
         grade: clean(b.grade, 80),
         governorate: clean(b.governorate, 60),
-        center: clean(b.center, 60),
-        village: clean(b.village, 60),
+        center: clean(b.center || '', 60),
+        village: clean(b.village || '', 60),
         parentName: clean(b.parentName, 100),
         parentPhone: pphone,
         status: 'active',
@@ -789,7 +1056,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/student/login', (req, res) => {
+  app.post('/api/student/login', async (req, res) => {
     try {
       const { phone, password, code } = req.body || {};
       const ph = clean(phone, 30);
@@ -818,7 +1085,46 @@ async function startServer() {
 
       if (!st) throw E(401, 'رقم الهاتف أو كلمة السر غير صحيحة');
       if (st.status === 'blocked') throw E(403, 'تم حجب هذا الحساب');
-      res.json({ token: newSession('student', st.id), role: 'student' });
+
+      // Multi-login prevention using Firestore
+      const deviceId = req.headers['x-device-id'] as string || 'unknown';
+        const studentDocRef = firestore.collection('students').doc(st.id);
+        try {
+          const snap = await studentDocRef.get();
+          if (snap.exists) {
+            const data = snap.data();
+            const deviceIds = data?.deviceIds || [];
+            if (!deviceIds.includes(deviceId)) {
+              if (deviceIds.length >= 1) {
+                throw E(403, 'لقد تجاوزت الحد الأقصى لعدد الأجهزة المسموح بها (جهاز واحد فقط). يرجى التواصل مع الدعم الفني لمسح الجهاز القديم.');
+              }
+              await studentDocRef.update({
+                deviceIds: admin.firestore.FieldValue.arrayUnion(deviceId),
+                lastLogin: new Date().toISOString()
+              });
+            } else {
+              await studentDocRef.update({
+                lastLogin: new Date().toISOString()
+              });
+            }
+          } else {
+            // First time login recording in Firestore
+            await studentDocRef.set({
+              id: st.id,
+              name: st.name,
+              phone: st.phone,
+              deviceIds: [deviceId],
+              lastLogin: new Date().toISOString(),
+              createdAt: new Date().toISOString()
+            });
+          }
+        } catch (err: any) {
+          if (err.status) throw err;
+          handleFirestoreError(err, OperationType.WRITE, `students/${st.id}`);
+        }
+      }
+
+      res.json({ token: newSession('student', st.id, { did: deviceId }), role: 'student' });
     } catch (e: any) {
       res.status(e.status || 401).json({ error: e.message });
     }
@@ -849,9 +1155,19 @@ async function startServer() {
 
   app.post('/api/teacher/login', (req, res) => {
     try {
-      const { code } = req.body || {};
-      const rawCode = clean(code, 200);
+      const { code, phone, password } = req.body || {};
+      const ph = clean(phone, 30);
+      const pw = clean(password, 100);
 
+      if (ph && pw) {
+        const sv = (db.supervisors || []).find(x => x.phone === ph && x.pass && scrypt(pw, db.settings.salt + x.id) === x.pass);
+        if (sv) {
+          return res.json({ token: newSession('teacher', 'SUP:' + sv.id), role: 'teacher', supervisor: sv });
+        }
+        throw E(401, 'رقم الهاتف أو كلمة السر للمشرف غير صحيحة');
+      }
+
+      const rawCode = clean(code, 200);
       // Support 100100 or admin directly
       const normRaw = rawCode.replace(/[أإآ]/g, 'ا').trim().toLowerCase();
       if (normRaw === '100100' || normRaw === 'admin' || normRaw === 'ادمن') {
@@ -860,14 +1176,157 @@ async function startServer() {
 
       const ok = scrypt(rawCode, db.settings.salt) === db.settings.teacher;
       if (!ok) {
-        const cd = rawCode.toUpperCase();
-        const sv = db.students.find(q => q.code === cd && q.supervisor && q.status !== 'blocked');
-        if (sv) return res.json({ token: newSession('teacher', 'S:' + sv.id), role: 'teacher' });
         throw E(401, 'كود الأستاذ غير صحيح');
       }
       res.json({ token: newSession('teacher', 'T'), role: 'teacher' });
     } catch (e: any) {
       res.status(e.status || 401).json({ error: e.message });
+    }
+  });
+
+  // Supervisor Management Endpoints
+  app.post('/api/teacher/supervisor', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const b = req.body || {};
+      const id = clean(b.id, 50);
+      const name = clean(b.name, 100);
+      const phone = clean(b.phone, 20);
+      const password = clean(b.password, 100);
+      const permissions = b.permissions || {
+        courses: true,
+        students: true,
+        exams: true,
+        coupons: true,
+        financials: true,
+        notices: true
+      };
+
+      if (!name || !phone) throw E(400, 'اكتب اسم ورقم هاتف المشرف');
+
+      db.supervisors = db.supervisors || [];
+      let sv = db.supervisors.find(x => x.id === id);
+      if (sv) {
+        sv.name = name;
+        sv.phone = phone;
+        if (password && password.length >= 4) {
+          sv.pass = scrypt(password, db.settings.salt + sv.id);
+        }
+        sv.permissions = permissions;
+      } else {
+        if (!password || password.length < 4) throw E(400, 'اكتب كلمة سر للمشرف من 4 أحرف على الأقل');
+        if (db.supervisors.some(x => x.phone === phone)) throw E(400, 'رقم الهاتف مسجل لمشرف آخر');
+        sv = {
+          id: 'sup-' + rnd(6),
+          name,
+          phone,
+          pass: '',
+          permissions,
+          created: new Date().toISOString()
+        };
+        sv.pass = scrypt(password, db.settings.salt + sv.id);
+        db.supervisors.push(sv);
+      }
+      save();
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/teacher/supervisor', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const id = clean(req.query.id as string, 50);
+      db.supervisors = (db.supervisors || []).filter(x => x.id !== id);
+      save();
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  // Bundles Management
+  app.get('/api/teacher/bundles', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      res.json(db.bundles || []);
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/teacher/bundles', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const { id, title, courseIds, discountedPrice } = req.body || {};
+      if (!title || !Array.isArray(courseIds) || courseIds.length === 0 || discountedPrice <= 0) {
+        throw E(400, 'بيانات الباقة غير مكتملة');
+      }
+      db.bundles = db.bundles || [];
+      const bundle = db.bundles.find(x => x.id === id);
+      if (bundle) {
+        bundle.title = clean(title, 200);
+        bundle.courseIds = courseIds;
+        bundle.discountedPrice = Number(discountedPrice);
+      } else {
+        db.bundles.push({
+          id: 'bnd-' + rnd(6),
+          title: clean(title, 200),
+          courseIds,
+          discountedPrice: Number(discountedPrice)
+        });
+      }
+      save();
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/teacher/bundles', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const id = clean(req.query.id as string, 50);
+      db.bundles = (db.bundles || []).filter(x => x.id !== id);
+      save();
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  // Affiliate Management
+  app.post('/api/student/affiliate/generate', (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      db.affiliates = db.affiliates || [];
+      let aff = db.affiliates.find(x => x.studentId === sAuth.id);
+      if (!aff) {
+        aff = {
+          id: 'aff-' + rnd(6),
+          studentId: sAuth.id,
+          code: mk('AFF', 4),
+          commissionRate: 0.1 // Default 10%
+        };
+        db.affiliates.push(aff);
+        save();
+      }
+      res.json(aff);
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/student/affiliate/stats', (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const aff = db.affiliates.find(x => x.studentId === sAuth.id);
+      if (!aff) throw E(404, 'غير مشترك في نظام التسويق');
+      const referrals = db.students.filter(x => x.referredBy === aff.code).length;
+      res.json({ ...aff, referrals });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
     }
   });
 
@@ -880,6 +1339,53 @@ async function startServer() {
       res.json(studentView(s));
     } catch (e: any) {
       res.status(e.status || 401).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/student/profile', (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const s = db.students.find(x => x.id === sAuth.id);
+      if (!s || s.status === 'blocked') throw E(403, 'تم حجب هذا الحساب');
+
+      const b = req.body || {};
+      if (clean(b.name, 100)) s.name = clean(b.name, 100);
+      if (clean(b.governorate, 60)) s.governorate = clean(b.governorate, 60);
+      if (clean(b.parentName, 100)) {
+        s.parentName = clean(b.parentName, 100);
+        const pr = db.parents.find(x => x.studentId === s.id);
+        if (pr) pr.name = s.parentName;
+      }
+      if (clean(b.parentPhone, 20) && /^01\d{9}$/.test(clean(b.parentPhone, 20))) {
+        s.parentPhone = clean(b.parentPhone, 20);
+      }
+      if (b.password && String(b.password).length >= 4) {
+        s.pass = scrypt(clean(b.password, 100), db.settings.salt + s.id);
+      }
+
+      save();
+      res.json({ ok: true, profile: studentView(s).profile });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/student/account/delete', (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const s = db.students.find(x => x.id === sAuth.id);
+      if (!s) throw E(404, 'الحساب غير موجود');
+
+      // Permanently remove student and related private data
+      db.students = db.students.filter(x => x.id !== s.id);
+      db.parents = db.parents.filter(x => x.studentId !== s.id);
+      db.results = db.results.filter(x => x.studentId !== s.id);
+      db.notes = (db.notes || []).filter(x => x.studentId !== s.id);
+      db.appeals = (db.appeals || []).filter(x => x.studentName !== s.name);
+      save();
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
     }
   });
 
@@ -1061,6 +1567,71 @@ async function startServer() {
     }
   });
 
+  app.post('/api/student/ai-exam/generate', async (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const student = db.students.find(x => x.id === sAuth.id);
+      if (!student) throw E(403, 'غير مصرح');
+
+      const wrongResults = db.results.filter(r => r.studentId === student.id && r.status === 'graded');
+      if (wrongResults.length === 0) {
+        throw E(400, 'لا توجد بيانات اختبارات سابقة لتوليد اختبار من الأخطاء');
+      }
+
+      const wrongQuestions = [];
+      for (const r of wrongResults) {
+        const exam = db.exams.find(e => e.id === r.examId);
+        if (exam) {
+          r.answers.forEach((ans: string, i: number) => {
+            const kind = qKind(exam, i);
+            const isCorrect = kind === 'mcq' ? ans === exam.key[i] : (r.questionFeedback && r.questionFeedback[i] && r.questionFeedback[i].score < r.questionFeedback[i].maxScore);
+            if (!isCorrect) {
+              wrongQuestions.push(exam.questions[i]);
+            }
+          });
+        }
+      }
+
+      if (wrongQuestions.length === 0) {
+        throw E(400, 'لا توجد أخطاء مسجلة لتوليد اختبار منها');
+      }
+
+      const prompt = `أنت معلم خبير. قم بتوليد امتحان جديد مكون من 5 أسئلة اختيارية (MCQ) بناءً على هذه المواضيع التي أخطأ فيها الطالب سابقاً:
+      ${wrongQuestions.slice(0, 10).map(q => typeof q === 'string' ? q : q.text).join('\n')}
+      أعد الامتحان بصيغة JSON:
+      {
+        "title": "اختبار تصحيح أخطاء الطالب",
+        "questions": ["سؤال 1", "سؤال 2", "سؤال 3", "سؤال 4", "سؤال 5"],
+        "options": [["أ","ب","ج","د"], ["أ","ب","ج","د"], ["أ","ب","ج","د"], ["أ","ب","ج","د"], ["أ","ب","ج","د"]],
+        "key": ["أ", "أ", "أ", "أ", "أ"],
+        "modelAnswer": "..."
+      }`;
+
+      const aiRes = await callGeminiWithRotation([{ role: 'user', parts: [{ text: prompt }]}], 'أنت معلم. أجب بصيغة JSON فقط.', true);
+      const examData = JSON.parse(aiRes.text);
+
+      const newExam = {
+        id: 'ex-ai-' + rnd(6),
+        title: examData.title,
+        grade: student.grade,
+        type: 'اختياري',
+        questions: examData.questions,
+        options: examData.options,
+        key: examData.key,
+        modelAnswer: examData.modelAnswer,
+        created: new Date().toISOString()
+      };
+
+      db.exams.push(newExam);
+      save();
+
+      res.json({ ok: true, exam: newExam });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+
   app.post('/api/student/message', (req, res) => {
     try {
       const sAuth = auth(req, 'student');
@@ -1181,37 +1752,96 @@ async function startServer() {
     }
   });
 
-  app.post('/api/student/assistant', async (req, res) => {
+  app.post(['/api/student/profile', '/api/student/profile/update'], (req, res) => {
     try {
-      auth(req, 'student');
-      const question = clean(req.body.question, 2000);
-      if (!question) throw E(400, 'اكتب سؤالاً');
-      const q = question.toLowerCase();
-      const isDev = /مطور|محمود مدحت/.test(question);
-      if (GEMINI_KEY && !isDev) {
-        try {
-          return res.json({ answer: await askGemini(question) });
-        } catch (e) {}
+      const sAuth = auth(req, 'student');
+      const s = db.students.find(x => x.id === sAuth.id);
+      if (!s) throw E(404, 'الطالب غير موجود');
+      const b = req.body || {};
+      if (clean(b.name, 100)) s.name = clean(b.name, 100);
+      if (clean(b.governorate, 100) !== undefined) s.governorate = clean(b.governorate, 100);
+      if (clean(b.parentName, 100) !== undefined) s.parentName = clean(b.parentName, 100);
+      if (clean(b.parentPhone, 30) !== undefined) s.parentPhone = clean(b.parentPhone, 30);
+      if (b.password && String(b.password).length >= 6) {
+        s.pass = scrypt(b.password, db.settings.salt);
       }
-
-      let answer = 'أستطيع مساعدتك في المنصة التعليمية. اكتب عنوان الدرس أو السؤال الذي تريد مساعدته فيه.';
-      if (isDev) {
-        answer = 'المطور هو محمود مدحت زكى. لا تتوفر معلومات أخرى عنه.';
-      } else if (q.includes('gemini') || q.includes('ai') || q.includes('ذكاء') || q.includes('مساعد')) {
-        answer = 'المساعد الذكي داخل المنصة يدعم الأسئلة التعليمية، ويمكن ربطه بـ Gemini API للإجابة الشاملة.';
-      } else if (q.includes('امتحان') || q.includes('اختبار')) {
-        answer = 'يمكنك الدخول إلى قسم الامتحانات من لوحة الطالب وحل الأسئلة المقالية أو الاختيارية.';
-      } else if (q.includes('مذكرة') || q.includes('ملاحظات')) {
-        answer = 'استخدم قسم ملاحظاتي داخل لوحة الطالب لحفظ ملحوظات كل درس للرجوع إليها لاحقاً.';
-      } else if (q.includes('فيديو') || q.includes('مشاهدة')) {
-        answer = 'يمكنك مشاهدة الفيديوهات بعد تفعيل اشتراكك أو كود الكورس، مع ظهور العلامة المائية أثناء العرض.';
-      }
-
-      res.json({ answer });
+      save();
+      res.json({ ok: true, name: s.name });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
   });
+
+  app.post('/api/student/account/delete', (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const sId = sAuth.id;
+      db.students = db.students.filter(x => x.id !== sId);
+      db.results = db.results.filter(x => x.studentId !== sId);
+      db.notes = (db.notes || []).filter(x => x.studentId !== sId);
+      db.messages = db.messages.filter(x => x.studentId !== sId);
+      db.walletTransactions = (db.walletTransactions || []).filter(x => x.studentId !== sId);
+      save();
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  const handleAiChat = async (req: Request, res: Response, roleName: string) => {
+    try {
+      const question = clean(req.body.question, 3000);
+      const imageBase64 = req.body.imageBase64;
+      if (!question && !imageBase64) throw E(400, 'اكتب استفساراً أو أرفق صورة');
+
+      if (hasValidGeminiKey()) {
+        try {
+          const sysPrompt = roleName === 'student'
+            ? 'أنت المعلم والمساعد الذكي التفاعلي لمنصة الأستاذ محمد التعليمية. أجب على الطالب بأسلوب تربوي ممتع وبأمثلة واضحة في المنهج واللغة العربية والإعراب.'
+            : roleName === 'parent'
+            ? 'أنت المستشار الأكاديمي والتربوي لولي الأمر في منصة الأستاذ محمد التعليمية. قدم نصائح ودراسة لمستوى الطالب وإرشادات المذاكرة والتحصيل.'
+            : 'أنت المساعد الأكاديمي الذكي للمعلم. ساعد المعلم في صياغة الامتحانات والأسئلة والواجبات وإعداد الملخصات والإعلانات الدراسية.';
+
+          const parts: any[] = [];
+          if (imageBase64) {
+            const cleanB64 = String(imageBase64).replace(/^data:image\/\w+;base64,/, '');
+            parts.push({
+              inlineData: {
+                mimeType: 'image/jpeg',
+                data: cleanB64
+              }
+            });
+          }
+          if (question) {
+            parts.push({ text: question });
+          }
+
+          const response = await callGeminiWithRotation([{ role: 'user', parts }], sysPrompt);
+          if (response.text) {
+            return res.json({ reply: response.text, answer: response.text });
+          }
+        } catch (err: any) {
+          console.warn('[AI Chat Error]', err);
+        }
+      }
+
+      // Friendly fallback
+      let reply = 'أستطيع مساعدتك في شرح دروس المنصة وإجابة استفساراتك. اكتب سؤالك وسأجيبك فوراً.';
+      if (question.includes('إعراب') || question.includes('نحو')) {
+        reply = 'التركيب النحوي والإعراب يعتمد على موقع الكلمة في الجملة (مبتدأ، خبر، فاعل، مفعول به). أرسل الجملة كاملة لنعربها سوياً!';
+      } else if (question.includes('امتحان') || question.includes('درجة')) {
+        reply = 'يمكنك مراجعة كافة الدرجات والنتائج والتصحيح المقالي التفصيلي من قسم الامتحانات بالمنصة.';
+      }
+
+      res.json({ reply, answer: reply });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  };
+
+  app.post(['/api/student/ai-chat', '/api/student/assistant'], (req, res) => handleAiChat(req, res, 'student'));
+  app.post('/api/parent/ai-chat', (req, res) => handleAiChat(req, res, 'parent'));
+  app.post('/api/teacher/ai-chat', (req, res) => handleAiChat(req, res, 'teacher'));
 
   app.post('/api/student/activity', (req, res) => {
     try {
@@ -1278,6 +1908,86 @@ async function startServer() {
   });
 
   // Teacher Endpoints
+  app.post('/api/student/generate-mistakes-exam', async (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const student = db.students.find(x => x.id === sAuth.id);
+      if (!student) throw E(404, 'الطالب غير موجود');
+
+      // 1. Get all student results with mistakes
+      const results = db.results.filter(r => r.studentId === student.id && r.status === 'graded');
+      const mistakeContext: any[] = [];
+
+      for (const resObj of results) {
+        const exam = db.exams.find(e => e.id === resObj.examId);
+        if (!exam) continue;
+
+        resObj.questionFeedback?.forEach((qf: any) => {
+          if (qf.score < qf.maxScore) {
+            mistakeContext.push({
+              examTitle: exam.title,
+              question: qf.questionText,
+              studentAnswer: qf.studentAnswer,
+              correctAnswer: qf.modelAnswer
+            });
+          }
+        });
+      }
+
+      if (mistakeContext.length === 0) {
+        throw E(400, 'لا توجد أخطاء سابقة مسجلة لتوليد امتحان مراجعة منها. ابدأ بحل بعض الامتحانات أولاً!');
+      }
+
+      // 2. Limit context to latest 10 mistakes to avoid prompt bloat
+      const context = mistakeContext.slice(-10);
+
+      // 3. Prompt Gemini to generate a new exam
+      const prompt = `بناءً على الأخطاء السابقة للطالب ${student.name} في اللغة العربية، قم بتوليد امتحان مراجعة ذكي يتكون من 5 أسئلة متنوعة (اختياري MCQ، صح وغلط، ومقالي Essay) تركز على هذه النقاط الضعيفة لتقويتها.
+أخطاء الطالب السابقة للتحليل:
+${JSON.stringify(context, null, 2)}
+
+قواعد التوليد:
+1. للأسئلة الاختيارية: اجعل النوع "mcq" والخيارات "أ، ب، ج، د".
+2. لأسئلة صح وغلط: اجعل النوع "mcq" والخيارات "صح، خطأ".
+3. للأسئلة المقالية: اجعل النوع "essay" والخيارات مصفوفة فارغة [].
+
+أعد الامتحان بصيغة JSON فقط ككائن واحد يحتوي على:
+{
+  "title": "امتحان مراجعة مخصص بناءً على أخطائك السابقة",
+  "type": "مختلط",
+  "questions": [ { "text": "نص السؤال", "points": 1 } ],
+  "kinds": ["mcq", "essay"],
+  "options": [ ["أ", "ب", "ج", "د"] ],
+  "key": ["الحرف الصحيح أو نص الإجابة النموذجية"]
+}`;
+
+      const aiRes = await callGeminiSDK({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        systemInstruction: 'أنت خبير تربوي في اللغة العربية. أعد الامتحان بصيغة JSON فقط بدون أي نص إضافي.',
+        isJson: true,
+        useSearch: false
+      });
+
+      let generatedExam: any = null;
+      try {
+        generatedExam = JSON.parse(aiRes.text);
+      } catch {
+        const m = aiRes.text.match(/\{[\s\S]*\}/);
+        if (m) generatedExam = JSON.parse(m[0]);
+      }
+
+      if (!generatedExam) throw new Error('فشل توليد الامتحان من الذكاء الاصطناعي');
+
+      // Assign a temporary ID for tracking
+      generatedExam.id = 'gen-' + rnd(6);
+      generatedExam.grade = student.grade;
+
+      res.json({ exam: generatedExam });
+    } catch (e: any) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
   app.get('/api/teacher/all', (req, res) => {
     try {
       const tAuth = auth(req, 'teacher');
@@ -1291,6 +2001,10 @@ async function startServer() {
         primaryColor: db.settings.primaryColor || '#0284c7',
         headingColor: db.settings.headingColor || '#ffffff',
         textColor: db.settings.textColor || '#cbd5e1',
+        fontFamily: db.settings.fontFamily || "'Cairo', sans-serif",
+        panelBg: db.settings.panelBg || '#0d1728',
+        cardBg: db.settings.cardBg || '#111f36',
+        accentGold: db.settings.accentGold || '#f59e0b',
         pageThemes: db.settings.pageThemes || {},
         academicColors: db.settings.academicColors || {},
         studentTabsVisibility: db.settings.studentTabsVisibility || {},
@@ -1314,12 +2028,168 @@ async function startServer() {
         socialLinks: db.socialLinks || [],
         gateways: db.gateways || [],
         walletTransactions: (db.walletTransactions || []).slice(-300).reverse(),
-        onlinePay: !!db.settings.onlinePay
+        onlinePay: !!db.settings.onlinePay,
+        liveSessions: db.liveSessions || [],
+        coupons: db.coupons || []
       });
     } catch (e: any) {
       res.status(e.status || 401).json({ error: e.message });
     }
   });
+
+  // Coupons & Promo Codes Endpoints
+  app.post('/api/teacher/coupon', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const b = req.body || {};
+      const code = clean(b.code, 30).toUpperCase();
+      const discountType = ['percentage', 'fixed', 'free_course'].includes(b.discountType) ? b.discountType : 'percentage';
+      const discountValue = Number(b.discountValue) || 10;
+      const courseId = clean(b.courseId, 50) || '';
+      const maxUses = Number(b.maxUses) || 100;
+      if (!code) throw E(400, 'أدخل كود الخصم');
+
+      db.coupons = db.coupons || [];
+      const coupon = {
+        id: 'coup-' + rnd(6),
+        code,
+        discountType,
+        discountValue,
+        courseId,
+        maxUses,
+        usedCount: 0,
+        expiresAt: b.expiresAt || new Date(Date.now() + 864e5 * 30).toISOString(),
+        created: new Date().toISOString()
+      };
+      db.coupons.unshift(coupon);
+      save();
+      res.json({ ok: true, coupon, coupons: db.coupons });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  const deleteCouponHandler = (req: Request, res: Response) => {
+    try {
+      auth(req, 'teacher');
+      const id = req.body?.id || req.query?.id;
+      db.coupons = (db.coupons || []).filter(c => c.id !== String(id));
+      save();
+      res.json({ ok: true, coupons: db.coupons });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  };
+  app.post('/api/teacher/coupon/delete', deleteCouponHandler);
+  app.delete(['/api/teacher/coupon', '/api/teacher/coupon/delete'], deleteCouponHandler);
+
+  // Teacher Grant Free Package/Course to Student
+  app.post('/api/teacher/student/grant-package', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const { studentId, courseId, days } = req.body || {};
+      const s = db.students.find(x => x.id === studentId);
+      if (!s) throw E(404, 'الطالب غير موجود');
+      const course = db.courses.find(x => x.id === courseId);
+      if (!course) throw E(404, 'الكورس غير موجود');
+
+      s.enrollments = s.enrollments || [];
+      const exp = new Date();
+      exp.setDate(exp.getDate() + (Number(days) || course.days || 30));
+      const existing = s.enrollments.find((e: any) => e.courseId === course.id);
+      if (existing) {
+        existing.expiresAt = exp.toISOString();
+      } else {
+        s.enrollments.push({ courseId: course.id, expiresAt: exp.toISOString() });
+      }
+      save();
+      res.json({ ok: true, message: `تم منح كورس "${course.title}" للطالب ${s.name} مجاناً بنجاح.` });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  // Google Meet Live Broadcast Endpoints
+  app.post('/api/teacher/live', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const b = req.body || {};
+      const title = clean(b.title, 150);
+      const grade = clean(b.grade, 80) || 'كل الصفوف';
+      let meetUrl = clean(b.meetUrl, 1000);
+      let meetCode = clean(b.meetCode, 50);
+
+      if (!title) throw E(400, 'اكتب عنوان الحصة أو البث المباشر');
+
+      if (!meetUrl && meetCode) {
+        meetUrl = `https://meet.google.com/${meetCode.replace(/\s+/g, '')}`;
+      } else if (meetUrl && !meetCode) {
+        const m = meetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
+        if (m) meetCode = m[1];
+      }
+
+      if (!meetUrl) throw E(400, 'يرجى وضع رابط أو كود Google Meet');
+
+      const course = b.courseId ? db.courses.find(c => c.id === b.courseId) : null;
+      const status = ['live', 'upcoming', 'ended'].includes(b.status) ? b.status : 'live';
+
+      const session: any = {
+        id: b.id || 'live-' + rnd(6),
+        title,
+        grade,
+        courseId: course?.id || '',
+        courseTitle: course?.title || 'عام لجميع الطلاب',
+        meetUrl,
+        meetCode: meetCode || 'meet-call',
+        status,
+        scheduledAt: b.scheduledAt || new Date().toISOString(),
+        notes: clean(b.notes, 500),
+        created: new Date().toISOString()
+      };
+
+      db.liveSessions = db.liveSessions || [];
+      if (b.id) {
+        const idx = db.liveSessions.findIndex(s => s.id === b.id);
+        if (idx >= 0) db.liveSessions[idx] = session;
+        else db.liveSessions.unshift(session);
+      } else {
+        db.liveSessions.unshift(session);
+      }
+
+      save();
+      res.json({ ok: true, session, liveSessions: db.liveSessions });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/teacher/live/status', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const { id, status } = req.body || {};
+      const sess = (db.liveSessions || []).find(s => s.id === id);
+      if (!sess) throw E(404, 'جلسة البث غير موجودة');
+      sess.status = status;
+      save();
+      res.json({ ok: true, session: sess, liveSessions: db.liveSessions });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  const deleteLiveHandler = (req: Request, res: Response) => {
+    try {
+      auth(req, 'teacher');
+      const id = req.body?.id || req.query.id;
+      db.liveSessions = (db.liveSessions || []).filter(s => s.id !== id);
+      save();
+      res.json({ ok: true, liveSessions: db.liveSessions });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  };
+  app.post('/api/teacher/live/delete', deleteLiveHandler);
+  app.delete(['/api/teacher/live', '/api/teacher/live/delete'], deleteLiveHandler);
 
   // Design settings
   app.post('/api/teacher/design-settings', (req, res) => {
@@ -1334,6 +2204,10 @@ async function startServer() {
       if (b.primaryColor) db.settings.primaryColor = clean(b.primaryColor, 20);
       if (b.headingColor) db.settings.headingColor = clean(b.headingColor, 20);
       if (b.textColor) db.settings.textColor = clean(b.textColor, 20);
+      if (b.fontFamily) db.settings.fontFamily = clean(b.fontFamily, 100);
+      if (b.panelBg) db.settings.panelBg = clean(b.panelBg, 30);
+      if (b.cardBg) db.settings.cardBg = clean(b.cardBg, 30);
+      if (b.accentGold) db.settings.accentGold = clean(b.accentGold, 30);
       if (b.pageThemes) db.settings.pageThemes = b.pageThemes;
       save();
       res.json({ ok: true });
@@ -1532,6 +2406,7 @@ async function startServer() {
       const b = req.body || {};
       if (clean(b.name, 100)) db.settings.name = clean(b.name, 100);
       if (b.onlinePay !== undefined) db.settings.onlinePay = !!b.onlinePay;
+      if (b.onlinePayKey !== undefined) db.settings.onlinePayKey = clean(b.onlinePayKey, 200);
       if (typeof b.payments === 'string') {
         db.settings.payments = b.payments
           .split(/\r?\n/)
@@ -1582,6 +2457,26 @@ async function startServer() {
         created: new Date().toISOString()
       };
       db.courses.push(course);
+
+      // Auto generate 5 access codes for the new course
+      db.codes = db.codes || [];
+      for (let i = 0; i < 5; i++) {
+        const part1 = mk('', 4).slice(1);
+        const part2 = mk('', 4).slice(1);
+        const c = `CRS-${part1}-${part2}`;
+        db.codes.push({
+          id: rnd(6),
+          code: c,
+          hash: sha(db.settings.pepper + c),
+          hint: c.slice(-4),
+          days: course.days,
+          courseId: course.id,
+          courseTitle: course.title,
+          status: 'unused',
+          created: new Date().toISOString()
+        });
+      }
+
       save();
       res.json({ ok: true, course });
     } catch (e: any) {
@@ -1589,7 +2484,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/teacher/course/delete', (req, res) => {
+  app.post(['/api/teacher/course/delete', '/api/teacher/course/archive'], (req, res) => {
     try {
       auth(req, 'teacher');
       const course = db.courses.find(x => x.id === req.body.id);
@@ -1624,6 +2519,7 @@ async function startServer() {
         mime: clean(b.mime, 100),
         isFree: !!b.isFree,
         blocked: [],
+        lecture: clean(b.lecture, 200),
         created: new Date().toISOString()
       });
       save();
@@ -1633,10 +2529,11 @@ async function startServer() {
     }
   });
 
-  app.post('/api/teacher/content/delete', (req, res) => {
+  const deleteContentHandler = (req: Request, res: Response) => {
     try {
       auth(req, 'teacher');
-      const c = db.content.find(x => x.id === req.body.id);
+      const id = req.body?.id || req.query.id;
+      const c = db.content.find(x => x.id === id);
       if (!c) throw E(404, 'غير موجود');
       if (c.fileId) {
         fs.rmSync(path.join(UP, path.basename(c.fileId)), { force: true });
@@ -1647,7 +2544,9 @@ async function startServer() {
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
-  });
+  };
+  app.post('/api/teacher/content/delete', deleteContentHandler);
+  app.delete(['/api/teacher/content', '/api/teacher/content/delete'], deleteContentHandler);
 
   app.post('/api/teacher/notice', (req, res) => {
     try {
@@ -1668,23 +2567,27 @@ async function startServer() {
     }
   });
 
-  app.post('/api/teacher/notice/delete', (req, res) => {
+  const deleteNoticeHandler = (req: Request, res: Response) => {
     try {
       auth(req, 'teacher');
-      db.notices = db.notices.filter(x => x.id !== req.body.id);
+      const id = req.body?.id || req.query.id;
+      db.notices = db.notices.filter(x => x.id !== id);
       save();
       res.json({ ok: true });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
-  });
+  };
+  app.post('/api/teacher/notice/delete', deleteNoticeHandler);
+  app.delete(['/api/teacher/notice', '/api/teacher/notice/delete'], deleteNoticeHandler);
 
   app.post('/api/teacher/exam', (req, res) => {
     try {
       auth(req, 'teacher');
       const b = req.body || {};
-      if (Array.isArray(b.items)) {
-        const items = b.items.slice(0, 50).filter((x: any) => x && clean(x.q, 1000));
+      const rawItems = Array.isArray(b.items) ? b.items : (Array.isArray(b.questions) ? b.questions : []);
+      if (rawItems.length) {
+        const items = rawItems.slice(0, 50).filter((x: any) => x && clean(x.q || x.text, 1000));
         if (!clean(b.title) || !items.length) throw E(400, 'اكتب عنواناً وأسئلة (حتى 50)');
         const L = ['أ', 'ب', 'ج', 'د'];
         const kinds: string[] = [];
@@ -1694,8 +2597,9 @@ async function startServer() {
         const models: string[] = [];
 
         for (const x of items) {
+          const qText = clean(x.q || x.text, 1000);
           const mcq = x.kind === 'mcq';
-          questions.push(clean(x.q, 1000));
+          questions.push(qText);
           kinds.push(mcq ? 'mcq' : 'essay');
           if (mcq) {
             const o = (Array.isArray(x.options) ? x.options : []).slice(0, 4).map((v: any) => clean(v, 300));
@@ -1708,12 +2612,15 @@ async function startServer() {
           } else {
             options.push([]);
             key.push('');
-            models.push(clean(x.model, 3000));
+            models.push(clean(x.model || x.modelAnswer, 3000));
           }
         }
 
         const course = b.courseId ? db.courses.find(x => x.id === b.courseId && x.status === 'published') : null;
         const type = kinds.every(k => k === 'mcq') ? 'اختياري' : kinds.every(k => k === 'essay') ? 'مقالي' : 'مختلط';
+
+        const customModelAnswer = clean(b.modelAnswer, 5000);
+        const autoModelAnswer = models.map((m, i) => (kinds[i] === 'essay' && m ? `س ${i + 1}: ${m}` : '')).filter(Boolean).join('\n');
 
         db.exams.push({
           id: rnd(6),
@@ -1726,7 +2633,7 @@ async function startServer() {
           questions,
           options,
           key,
-          modelAnswer: models.map((m, i) => (kinds[i] === 'essay' ? `${i + 1}. ${m}` : '')).filter(Boolean).join('\n'),
+          modelAnswer: customModelAnswer || autoModelAnswer,
           created: new Date().toISOString()
         });
         save();
@@ -1739,12 +2646,67 @@ async function startServer() {
     }
   });
 
-  app.post('/api/teacher/exam/delete', (req, res) => {
+  const deleteExamHandler = (req: Request, res: Response) => {
     try {
       auth(req, 'teacher');
-      db.exams = db.exams.filter(x => x.id !== req.body.id);
+      const id = req.body?.id || req.query.id;
+      db.exams = db.exams.filter(x => x.id !== id);
       save();
       res.json({ ok: true });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  };
+  app.post('/api/teacher/exam/delete', deleteExamHandler);
+  app.delete(['/api/teacher/exam', '/api/teacher/exam/delete'], deleteExamHandler);
+
+  // AI Exam Grading Endpoints for Teachers
+  app.post('/api/teacher/results/ai-grade', async (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const { resultId } = req.body || {};
+      const r = db.results.find(x => x.id === resultId);
+      if (!r) throw E(404, 'النتيجة غير موجودة');
+      const exam = db.exams.find(e => e.id === r.examId);
+      if (!exam) throw E(404, 'الامتحان غير موجود');
+
+      const graded = await gradeFullExamSubmissionWithAI(exam, r.answers, null);
+      r.score = graded.score;
+      r.total = graded.total;
+      r.label = graded.label;
+      r.status = 'graded';
+      r.aiGraded = true;
+      r.aiFeedback = graded.feedback;
+      r.questionFeedback = graded.questionFeedback;
+      save();
+      res.json({ ok: true, result: r });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/teacher/results/ai-grade-all', async (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const { examId } = req.body || {};
+      const pending = (db.results || []).filter(r => (!examId || r.examId === examId) && r.status === 'pending');
+      let count = 0;
+      for (const r of pending) {
+        const exam = db.exams.find(e => e.id === r.examId);
+        if (exam) {
+          const graded = await gradeFullExamSubmissionWithAI(exam, r.answers, null);
+          r.score = graded.score;
+          r.total = graded.total;
+          r.label = graded.label;
+          r.status = 'graded';
+          r.aiGraded = true;
+          r.aiFeedback = graded.feedback;
+          r.questionFeedback = graded.questionFeedback;
+          count++;
+        }
+      }
+      save();
+      res.json({ ok: true, count, message: `تم تصحيح ${count} امتحان بنجاح بواسطة الذكاء الاصطناعي` });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
@@ -1846,47 +2808,58 @@ async function startServer() {
     try {
       auth(req, 'teacher');
       const b = req.body || {};
-      const n = Math.min(Math.max(+b.count || 1, 1), 100);
+      const n = Math.min(Math.max(+b.count || 1, 1), 200);
       const days = Math.min(Math.max(+b.days || 30, 1), 3650);
       const course = b.courseId ? db.courses.find(x => x.id === b.courseId && x.status === 'published') : null;
       if (b.courseId && !course) throw E(400, 'اختر كورساً منشوراً أو اشتراكاً عاماً');
-      if (course && days !== course.days) throw E(400, 'مدة الكود يجب أن تطابق مدة الكورس');
+
+      const customPrefix = clean(b.prefix, 10).toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const prefix = customPrefix || (course ? 'CRS' : 'SUB');
 
       const out: string[] = [];
       for (let i = 0; i < n; i++) {
-        const c = [mk('', 4), mk('', 4), mk('', 4)].map(x => x.slice(1)).join('-');
+        const part1 = mk('', 4).slice(1);
+        const part2 = mk('', 4).slice(1);
+        const c = `${prefix}-${part1}-${part2}`;
         out.push(c);
         db.codes.push({
           id: rnd(6),
+          code: c,
           hash: sha(db.settings.pepper + c),
           hint: c.slice(-4),
-          days,
+          days: course ? course.days : days,
           courseId: course?.id || '',
+          courseTitle: course?.title || 'اشتراك عام في المنصة',
           status: 'unused',
           created: new Date().toISOString()
         });
       }
       save();
       res.json({
+        ok: true,
         codes: out,
         course: course ? { title: course.title, price: course.price, days: course.days } : null,
-        days
+        days: course ? course.days : days,
+        count: out.length
       });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
   });
 
-  app.post('/api/teacher/codes/delete', (req, res) => {
+  const deleteCodeHandler = (req: Request, res: Response) => {
     try {
       auth(req, 'teacher');
-      db.codes = db.codes.filter(x => !(x.id === req.body.id && x.status === 'unused'));
+      const id = req.body?.id || req.query.id;
+      db.codes = db.codes.filter(x => !(x.id === id && x.status === 'unused'));
       save();
       res.json({ ok: true });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
-  });
+  };
+  app.post('/api/teacher/codes/delete', deleteCodeHandler);
+  app.delete(['/api/teacher/codes', '/api/teacher/code'], deleteCodeHandler);
 
   // Teacher Social Media CRUD endpoints
   app.post('/api/teacher/social', (req, res) => {
@@ -1920,18 +2893,20 @@ async function startServer() {
     }
   });
 
-  app.post('/api/teacher/social/delete', (req, res) => {
+  const deleteSocialHandler = (req: Request, res: Response) => {
     try {
       auth(req, 'teacher');
-      const { id } = req.body || {};
+      const id = req.body?.id || req.query?.id;
       if (!id) throw E(400, 'معرف الرابط مطلوب');
-      db.socialLinks = (db.socialLinks || []).filter(s => s.id !== id);
+      db.socialLinks = (db.socialLinks || []).filter(s => s.id !== String(id));
       save();
       res.json({ ok: true, socialLinks: db.socialLinks });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
-  });
+  };
+  app.post('/api/teacher/social/delete', deleteSocialHandler);
+  app.delete(['/api/teacher/social', '/api/teacher/social/delete', '/api/teacher/social-link'], deleteSocialHandler);
 
   app.post('/api/teacher/social/toggle', (req, res) => {
     try {
@@ -1942,6 +2917,246 @@ async function startServer() {
       item.active = !item.active;
       save();
       res.json({ ok: true, item, socialLinks: db.socialLinks });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  // ==========================================
+  // GOOGLE MEET LIVE SESSIONS & AUTOMATED ATTENDANCE TRACKING
+  // ==========================================
+  app.get('/api/teacher/live-sessions', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      res.json({
+        ok: true,
+        liveSessions: db.liveSessions || [],
+        liveAttendance: db.liveAttendance || []
+      });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/teacher/live-session', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const b = req.body || {};
+      const title = clean(b.title, 200);
+      const meetUrl = clean(b.meetUrl, 500);
+      const grade = clean(b.grade, 50) || 'كل الصفوف';
+      const scheduledAt = clean(b.scheduledAt, 100) || new Date().toISOString();
+      const status = clean(b.status, 20) || 'active'; // 'scheduled' | 'active' | 'ended'
+      const notes = clean(b.notes, 500);
+
+      if (!title) throw E(400, 'عنوان حلقة البث المباشر مطلوب');
+      if (!meetUrl) throw E(400, 'رابط Google Meet مطلوب');
+
+      db.liveSessions = db.liveSessions || [];
+      if (b.id) {
+        const item = db.liveSessions.find(s => s.id === b.id);
+        if (!item) throw E(404, 'البث غير موجود');
+        item.title = title;
+        item.meetUrl = meetUrl;
+        item.grade = grade;
+        item.scheduledAt = scheduledAt;
+        item.status = status;
+        item.notes = notes;
+      } else {
+        const newSession = {
+          id: 'meet-' + rnd(6),
+          title,
+          meetUrl,
+          grade,
+          scheduledAt,
+          status,
+          notes,
+          created: new Date().toISOString()
+        };
+        db.liveSessions.push(newSession);
+      }
+      save();
+
+      // Notify students if set to active
+      if (status === 'active') {
+        notifyAdminEvents(`🔴 بدء بث مباشر جديد عبر Google Meet: ${title}`, `الصف: ${grade}\nرابط الانضمام: ${meetUrl}`);
+      }
+
+      res.json({ ok: true, liveSessions: db.liveSessions });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  const deleteLiveSessionHandler = (req: Request, res: Response) => {
+    try {
+      auth(req, 'teacher');
+      const id = req.body?.id || req.query?.id;
+      if (!id) throw E(400, 'معرف البث مطلوب');
+      db.liveSessions = (db.liveSessions || []).filter(s => s.id !== String(id));
+      db.liveAttendance = (db.liveAttendance || []).filter(a => a.sessionId !== String(id));
+      save();
+      res.json({ ok: true, liveSessions: db.liveSessions, liveAttendance: db.liveAttendance });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  };
+  app.post('/api/teacher/live-session/delete', deleteLiveSessionHandler);
+  app.delete(['/api/teacher/live-session', '/api/teacher/live-session/delete'], deleteLiveSessionHandler);
+
+  // Manual Attendance Adjustment by Teacher
+  app.post('/api/teacher/live-attendance/manual', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      const b = req.body || {};
+      const sessionId = clean(b.sessionId, 50);
+      const studentId = clean(b.studentId, 50);
+      const status = clean(b.status, 50) || 'حاضر يدوياً';
+      const notes = clean(b.notes, 200);
+
+      const student = (db.students || []).find(s => s.id === studentId);
+      const session = (db.liveSessions || []).find(s => s.id === sessionId);
+      if (!student || !session) throw E(404, 'بيانات الطالب أو حلقة البث غير موجودة');
+
+      db.liveAttendance = db.liveAttendance || [];
+      let record = db.liveAttendance.find(a => a.sessionId === sessionId && a.studentId === studentId);
+      if (record) {
+        record.status = status;
+        record.notes = notes;
+        record.updatedAt = new Date().toISOString();
+      } else {
+        record = {
+          id: 'att-' + rnd(6),
+          sessionId,
+          sessionTitle: session.title,
+          studentId: student.id,
+          studentName: student.name,
+          studentPhone: student.phone,
+          grade: student.grade,
+          joinedAt: new Date().toISOString(),
+          status,
+          notes,
+          type: 'manual'
+        };
+        db.liveAttendance.push(record);
+      }
+      save();
+      res.json({ ok: true, record, liveAttendance: db.liveAttendance });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  // Student Attendance Trigger when clicking Google Meet Link
+  app.post('/api/student/live-attend', (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const student = (db.students || []).find(s => s.id === sAuth.id);
+      if (!student || student.status === 'blocked') throw E(403, 'حساب غير متاح');
+
+      const { sessionId } = req.body || {};
+      const session = (db.liveSessions || []).find(s => s.id === sessionId);
+      if (!session) throw E(404, 'حلقة البث المباشر غير موجودة');
+
+      db.liveAttendance = db.liveAttendance || [];
+      let existingRecord = db.liveAttendance.find(a => a.sessionId === sessionId && a.studentId === student.id);
+
+      const now = new Date().toISOString();
+      if (!existingRecord) {
+        existingRecord = {
+          id: 'att-' + rnd(6),
+          sessionId: session.id,
+          sessionTitle: session.title,
+          studentId: student.id,
+          studentName: student.name,
+          studentPhone: student.phone,
+          grade: student.grade,
+          joinedAt: now,
+          status: 'حاضر آلياً',
+          type: 'auto',
+          device: clean(req.headers['user-agent'] || 'Web', 150)
+        };
+        db.liveAttendance.push(existingRecord);
+        save();
+
+        // Send WhatsApp notification to parent if enabled
+        if (student.parentPhone) {
+          sendWhatsAppNotification(
+            student.parentPhone,
+            `✅ *إشعار حضور بث مباشر*\nتم انضمام ابنك الطالب/ة (${student.name}) بحضور آلي موثق لحلقة البث المباشر: "${session.title}" بتاريخ ${new Date().toLocaleTimeString('ar-EG')}.`
+          );
+        }
+      }
+
+      res.json({
+        ok: true,
+        alreadyRecorded: !!existingRecord,
+        attendance: existingRecord,
+        meetUrl: session.meetUrl
+      });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/student/live-attend-qr', async (req, res) => {
+    try {
+      const sAuth = auth(req, 'student');
+      const student = (db.students || []).find(s => s.id === sAuth.id);
+      if (!student || student.status === 'blocked') throw E(403, 'حساب غير متاح');
+
+      const { sessionId, qrCode } = req.body || {};
+      const session = (db.liveSessions || []).find(s => s.id === sessionId);
+      if (!session) throw E(404, 'حلقة البث غير موجودة');
+
+      // Simple QR validation (QR code contains sessionId)
+      if (qrCode !== sessionId) throw E(400, 'كود QR غير صحيح');
+
+      db.liveAttendance = db.liveAttendance || [];
+      let existingRecord = db.liveAttendance.find(a => a.sessionId === sessionId && a.studentId === student.id);
+
+      if (!existingRecord) {
+        existingRecord = {
+          id: 'att-' + rnd(6),
+          sessionId: session.id,
+          sessionTitle: session.title,
+          studentId: student.id,
+          studentName: student.name,
+          studentPhone: student.phone,
+          grade: student.grade,
+          joinedAt: new Date().toISOString(),
+          status: 'حاضر (QR)',
+          type: 'qr'
+        };
+        db.liveAttendance.push(existingRecord);
+        save();
+        
+        // Sync to Firestore
+        try {
+          await firestore.collection('live_attendance').doc(existingRecord.id).set({
+            ...existingRecord
+          });
+        } catch (err) {
+          console.error('Failed to sync attendance to Firestore:', err);
+        }
+
+        notifyAdminEvents('حضور مباشر عبر QR', `الطالب ${student.name} حضر حلقة: ${session.title}`);
+      }
+
+      res.json({ ok: true, attendance: existingRecord });
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/parent/live-attendance', (req, res) => {
+    try {
+      const pAuth = auth(req, 'parent');
+      const parent = (db.parents || []).find(p => p.id === pAuth.id);
+      if (!parent || !parent.studentId) throw E(404, 'بيانات الحساب غير مكتملة');
+
+      const logs = (db.liveAttendance || []).filter(a => a.studentId === parent.studentId);
+      res.json({ ok: true, attendanceLogs: logs });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
@@ -2116,18 +3331,20 @@ async function startServer() {
     }
   });
 
-  app.post('/api/teacher/gateway/delete', (req, res) => {
+  const deleteGatewayHandler = (req: Request, res: Response) => {
     try {
       auth(req, 'teacher');
-      const { id } = req.body || {};
+      const id = req.body?.id || req.query?.id;
       if (!id) throw E(400, 'معرف طريقة الدفع مطلوب');
-      db.gateways = (db.gateways || []).filter(g => g.id !== id);
+      db.gateways = (db.gateways || []).filter(g => g.id !== String(id));
       save();
       res.json({ ok: true, gateways: db.gateways });
     } catch (e: any) {
       res.status(e.status || 400).json({ error: e.message });
     }
-  });
+  };
+  app.post('/api/teacher/gateway/delete', deleteGatewayHandler);
+  app.delete(['/api/teacher/gateway', '/api/teacher/gateway/delete'], deleteGatewayHandler);
 
   app.post('/api/teacher/gateway/toggle', (req, res) => {
     try {
@@ -2461,9 +3678,9 @@ async function startServer() {
       const s = db.students.find(x => x.id === sAuth.id);
       if (!s || s.status === 'blocked') throw E(403, 'تم حجب هذا الحساب');
 
-      const { question, isExamActive, imageBase64 } = req.body || {};
+      const { question, isExamActive, imageBase64, history } = req.body || {};
 
-      // STRICT ANTI-CHEAT RULE: Completely block AI assistant during exams
+      // STRICT ANTI-CHEAT RULE
       if (isExamActive) {
         throw E(403, '⛔ تم حجب وإغلاق المساعد الذكي تلقائياً لمنع الغش أثناء أداء الامتحان.');
       }
@@ -2471,6 +3688,7 @@ async function startServer() {
       const q = clean(question, 3000);
       if (!q && !imageBase64) throw E(400, 'اكتب سؤالك أو ارفع صورة لمناقشتها');
 
+      const contents = Array.isArray(history) ? history : [];
       const parts: any[] = [];
       if (imageBase64) {
         const cleanB64 = String(imageBase64).replace(/^data:image\/\w+;base64,/, '');
@@ -2481,14 +3699,74 @@ async function startServer() {
           }
         });
       }
-      parts.push({ text: q || 'يرجى شرح محتوى هذه الصورة وحل المسائل الموضحة بها بأسلوب تعليمي مبسط.' });
+      if (q) {
+        parts.push({ text: q });
+      } else if (imageBase64) {
+        parts.push({ text: 'يرجى شرح محتوى هذه الصورة وحل المسائل الموضحة بها بأسلوب تعليمي مبسط.' });
+      }
+      contents.push({ role: 'user', parts });
 
-      const systemInstruction = 'أنت المساعد الذكي الخاص بطلاب منصة ليرن ويب التعليمية. اشرح المفاهيم بوضوح ولغة عربية سليمة ومبسطة، وشجع الطالب على التفكير والفهم. إذا كانت هناك صورة واجب أو سؤال، وضح خطوات الحل بالتفصيل خطوة بخطوة.';
-      const aiRes = await callGeminiWithRotation([{ role: 'user', parts }], systemInstruction);
+      const systemInstruction = `أنت المساعد التعليمي الذكي (AI Study Buddy) لمنصة الأستاذ محمد عبد المقصود. 
+مهمتك مساعدة الطلاب في فهم اللغة العربية والمواد الدراسية.
+استخدم أسلوباً مشجعاً وودوداً.
+عند الإجابة على أسئلة عامة أو معقدة، استخدم أداة البحث في جوجل (Google Search) لضمان دقة المعلومات وتوفير مصادر خارجية إذا لزم الأمر.
+دائماً وجه الطالب لكتب الوزارة والمناهج الرسمية في النهاية.`;
 
-      res.json({ ok: true, reply: aiRes.text });
+      const aiRes = await callGeminiSDK({
+        contents,
+        systemInstruction,
+        useSearch: true
+      });
+
+      res.json({ 
+        ok: true,
+        reply: aiRes.text, 
+        answer: aiRes.text,
+        groundingMetadata: aiRes.groundingMetadata 
+      });
     } catch (e: any) {
-      res.status(e.status || 500).json({ error: e.message });
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  // Google Auth Verify Route
+  app.post('/api/auth/google', async (req, res) => {
+    try {
+      const { idToken } = req.body;
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      const email = decodedToken.email;
+      const googleId = decodedToken.uid;
+      const name = decodedToken.name;
+
+      let st = db.students.find(s => s.googleId === googleId || (email && s.email === email));
+      if (!st) {
+        st = {
+          id: rnd(6),
+          code: mk('ST'),
+          name: name || 'طالب جوجل',
+          email: email || '',
+          googleId,
+          phone: '', 
+          grade: 'غير محدد',
+          status: 'active',
+          subEnd: '',
+          walletBalance: 0,
+          pass: '',
+          enrollments: [],
+          created: new Date().toISOString()
+        };
+        db.students.push(st);
+        save();
+      } else if (!st.googleId) {
+        st.googleId = googleId;
+        save();
+      }
+
+      const deviceId = req.headers['x-device-id'] as string || 'unknown';
+      res.json({ token: newSession('student', st.id, { did: deviceId }), role: 'student' });
+    } catch (e: any) {
+      console.error('[Google Auth Error]', e);
+      res.status(401).json({ error: 'فشل التحقق من حساب جوجل' });
     }
   });
 
@@ -2659,6 +3937,31 @@ ${Array.isArray(answers) ? answers.map((a: any, i: number) => `${i + 1}. ${a || 
       res.json({ ok: true, result: examRes });
     } catch (e: any) {
       res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/teacher/settings/toggle-pay', (req, res) => {
+    try {
+      auth(req, 'teacher');
+      db.settings.onlinePay = !db.settings.onlinePay;
+      save();
+      res.json({ ok: true, onlinePay: db.settings.onlinePay });
+    } catch (e: any) {
+      res.status(e.status || 401).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/student/cashier-unlock', (req, res) => {
+    try {
+      auth(req, 'student');
+      const { key } = req.body || {};
+      if (key && key === db.settings.cashierKey) {
+        res.json({ ok: true, message: 'تم تفعيل الدفع الإلكتروني بنجاح' });
+      } else {
+        throw E(400, 'كود الكاشير غير صحيح');
+      }
+    } catch (e: any) {
+      res.status(e.status || 400).json({ error: e.message });
     }
   });
 

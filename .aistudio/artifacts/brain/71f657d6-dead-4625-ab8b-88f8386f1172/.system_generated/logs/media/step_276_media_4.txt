@@ -1,0 +1,7 @@
+---
+type: "feature"
+title: "Add Bioscience Skills"
+icon: "science"
+---
+
+I want to use Science skills in this app. You **MUST** use the science skill for this.
