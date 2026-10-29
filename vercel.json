@@ -1,0 +1,9 @@
+{
+  "rewrites": [
+    { "source": "/api/index", "destination": "/api/index.js" },
+    { "source": "/api/:path*", "destination": "/api/index?__path=/api/:path*" },
+    { "source": "/public-files/:path*", "destination": "/api/index?__path=/public-files/:path*" },
+    { "source": "/files/:path*", "destination": "/api/index?__path=/files/:path*" },
+    { "source": "/hero", "destination": "/api/index?__path=/hero" }
+  ]
+}

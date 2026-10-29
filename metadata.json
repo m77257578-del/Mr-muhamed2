@@ -1,0 +1,7 @@
+{
+  "name": "منصة الأستاذ محمد عبد المقصود",
+  "description": "منصة تعليمية متكاملة للغة العربية للطلاب وأولياء الأمور والمعلم",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
